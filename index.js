@@ -125,14 +125,15 @@ async function sheetsBatchUpdateValues(data) {
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    const rows = await sheetsGet('AreaManagers!A2:B');
+    const rows = await sheetsGet('AreaManagers!A2:C');
     const found = rows.find(
       (r) =>
         (r[0] || '').trim().toLowerCase() === (username || '').trim().toLowerCase() &&
         String(r[1] || '') === String(password || '')
     );
     if (!found) return res.json({ ok: false, error: 'Invalid username or password' });
-    res.json({ ok: true, manager: found[0] });
+    const level = (found[2] || 'Area Manager').trim();
+    res.json({ ok: true, manager: found[0], level });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -141,10 +142,12 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/stores', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
+    const level = (req.query.level || '').trim().toLowerCase();
     // ListOfStores columns: A=No, B=Region, C=AREA, D=STORE ID, E=STORE NAME, F=Remarks, G=AreaManager
     const rows = await sheetsGet('ListOfStores!A2:G');
+    const isRegional = level === 'regional manager';
     const stores = rows
-      .filter((r) => (r[6] || '').trim().toLowerCase() === manager)
+      .filter((r) => isRegional || (r[6] || '').trim().toLowerCase() === manager)
       .map((r) => r[4])
       .filter(Boolean);
     res.json({ ok: true, stores });
@@ -207,11 +210,13 @@ async function markEdited(auditId) {
 app.get('/api/history', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
+    const level = (req.query.level || '').trim().toLowerCase();
+    const isRegional = level === 'regional manager';
     const rows = await sheetsGet('ChecklistData!A2:J');
     const map = new Map();
     rows.forEach((r) => {
       if ((r[9] || 'ACTIVE') !== 'ACTIVE') return;
-      if (manager && (r[2] || '').trim().toLowerCase() !== manager) return;
+      if (!isRegional && manager && (r[2] || '').trim().toLowerCase() !== manager) return;
       const id = r[1];
       if (!id) return;
       if (!map.has(id)) {
@@ -367,7 +372,7 @@ button.sm{padding:6px 10px;font-size:13px}
 </main>
 
 <script>
-const S = { manager:null, particulars:[], ratings:{}, remarks:{}, editingId:null };
+const S = { manager:null, level:null, particulars:[], ratings:{}, remarks:{}, editingId:null };
 
 function $(q){return document.querySelector(q)}
 function api(url, opts){ return fetch(url, opts).then(r=>r.json()) }
@@ -378,25 +383,26 @@ $('#loginBtn').onclick = async () => {
   $('#loginErr').textContent = '';
   const r = await api('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p})});
   if (!r.ok) { $('#loginErr').textContent = r.error || 'Login failed'; return; }
-  S.manager = r.manager;
+  S.manager = r.manager; S.level = r.level || 'Area Manager';
   localStorage.setItem('ff5_mgr', r.manager);
+  localStorage.setItem('ff5_lvl', S.level);
   await enterApp();
 };
 
-$('#logoutBtn').onclick = () => { localStorage.removeItem('ff5_mgr'); location.reload(); };
+$('#logoutBtn').onclick = () => { localStorage.removeItem('ff5_mgr'); localStorage.removeItem('ff5_lvl'); location.reload(); };
 
 async function enterApp(){
   $('#loginScreen').classList.add('hidden');
   $('#appScreen').classList.remove('hidden');
   $('#logoutBtn').classList.remove('hidden');
-  $('#whoName').textContent = S.manager;
+  $('#whoName').textContent = S.manager + ' (' + S.level + ')';
   $('#date').value = new Date().toISOString().slice(0,10);
   await Promise.all([loadStores(), loadParticulars()]);
   renderChecklist();
 }
 
 async function loadStores(){
-  const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager));
+  const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
   const sel = $('#store'); sel.innerHTML = '';
   (r.stores||[]).forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
   if (!r.stores || !r.stores.length) sel.innerHTML = '<option>(no stores assigned)</option>';
@@ -484,14 +490,14 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
 
 async function loadHistory(){
   $('#histList').textContent = 'Loading...';
-  const r = await api('/api/history?manager=' + encodeURIComponent(S.manager));
+  const r = await api('/api/history?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
   if (!r.ok) { $('#histList').textContent = r.error||'Failed'; return; }
   if (!r.audits.length) { $('#histList').textContent = 'No audits yet.'; return; }
   $('#histList').innerHTML = r.audits.map(a => \`
     <div class="hist">
       <div>
         <div><b>\${escapeHtml(a.store)}</b> - \${escapeHtml(a.date)}</div>
-        <div class="meta">\${new Date(a.timestamp).toLocaleString()} - \${a.count} items</div>
+        <div class="meta">\${new Date(a.timestamp).toLocaleString()} - \${a.count} items - by \${escapeHtml(a.manager)}</div>
       </div>
       <div style="text-align:right">
         <div class="pill">\${a.score}%</div>
@@ -522,7 +528,7 @@ async function editAudit(id){
 
 // Auto-login if remembered
 const remembered = localStorage.getItem('ff5_mgr');
-if (remembered) { S.manager = remembered; enterApp(); }
+if (remembered) { S.manager = remembered; S.level = localStorage.getItem('ff5_lvl')||'Area Manager'; enterApp(); }
 </script>
 </body></html>`;
 

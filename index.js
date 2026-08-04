@@ -520,10 +520,13 @@ async function editAudit(id){
     const m = map[key(p.category,p.item)];
     if (m) { if (m.rating!==''&&m.rating!=null) S.ratings['k'+i]=String(m.rating); if (m.remarks) S.remarks['k'+i]=m.remarks; }
   });
-  $('#store').value = r.meta.store;
-  $('#date').value = r.meta.date;
   $('#editBanner').classList.remove('hidden');
   document.querySelector('.tabs button[data-tab="new"]').click();
+  // Set store/date AFTER tab switch (dropdown must be visible for value to stick reliably)
+  const setStore = () => { const opt=[...$('#store').options].find(o=>o.value===r.meta.store); if(opt) $('#store').value=r.meta.store; };
+  setStore();
+  $('#date').value = r.meta.date;
+  renderChecklist();
 }
 
 // Auto-login if remembered

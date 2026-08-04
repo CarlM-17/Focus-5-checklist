@@ -1,0 +1,15 @@
+{
+  "name": "fresh-focus-5-checklist",
+  "version": "1.0.0",
+  "description": "Fresh Focus 5 Fresh Department Checklist (Area Manager audit) backed by Google Sheets",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

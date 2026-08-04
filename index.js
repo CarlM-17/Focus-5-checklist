@@ -274,43 +274,60 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // ---------- Frontend ----------
 const HTML = `<!doctype html>
 <html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="theme-color" content="#1f7a3a"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <title>Fresh Focus 5 - Checklist</title>
 <style>
-*{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f8;color:#222}
-header{background:#1f7a3a;color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10}
-header h1{margin:0;font-size:17px}
-header .who{font-size:12px;opacity:.9}
+*{box-sizing:border-box;-webkit-tap-highlight-color:rgba(0,0,0,0)}
+html,body{overscroll-behavior-y:contain}
+body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f8;color:#222;padding-bottom:env(safe-area-inset-bottom)}
+header{background:#1f7a3a;color:#fff;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;gap:8px}
+header h1{margin:0;font-size:16px;line-height:1.2}
+header .who{font-size:12px;opacity:.95;text-align:right;display:flex;align-items:center;gap:6px;flex-shrink:0}
 main{padding:12px;max-width:820px;margin:0 auto}
 .card{background:#fff;border-radius:10px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 label{display:block;font-size:12px;color:#555;margin-bottom:4px;margin-top:8px}
 input,select,textarea,button{font:inherit}
-input,select,textarea{width:100%;padding:10px;border:1px solid #ccd;border-radius:8px;background:#fff}
-textarea{min-height:44px;resize:vertical}
-button{cursor:pointer;border:0;border-radius:8px;padding:10px 14px;background:#1f7a3a;color:#fff;font-weight:600}
+/* font-size:16px prevents iOS Safari auto-zoom on focus */
+input,select,textarea{width:100%;padding:12px;border:1px solid #ccd;border-radius:8px;background:#fff;font-size:16px;min-height:44px}
+textarea{min-height:56px;resize:vertical;font-size:15px}
+button{cursor:pointer;border:0;border-radius:8px;padding:12px 14px;background:#1f7a3a;color:#fff;font-weight:600;min-height:44px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+button:active{transform:scale(.97)}
 button.ghost{background:#eef;color:#224}
-button.sm{padding:6px 10px;font-size:13px}
-.row{display:flex;gap:8px}
-.row>*{flex:1}
-.cat{margin-top:14px;font-weight:700;color:#1f7a3a;border-bottom:2px solid #1f7a3a;padding-bottom:4px}
-.item{padding:10px 0;border-bottom:1px solid #eee}
-.item .t{font-weight:600;margin-bottom:6px}
-.rate{display:flex;gap:6px;margin-bottom:6px}
-.rate button{flex:1;background:#eef;color:#334;padding:8px;font-weight:700}
+button.sm{padding:8px 12px;font-size:13px;min-height:36px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row>*{flex:1 1 140px;min-width:0}
+.cat{margin-top:14px;font-weight:700;color:#1f7a3a;border-bottom:2px solid #1f7a3a;padding-bottom:4px;position:sticky;top:56px;background:#fff;z-index:1}
+.item{padding:12px 0;border-bottom:1px solid #eee}
+.item .t{font-weight:600;margin-bottom:8px;font-size:15px;line-height:1.35}
+.rate{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px}
+.rate button{background:#eef;color:#334;padding:10px 4px;font-weight:700;font-size:13px;line-height:1.15;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.rate button .num{font-size:18px;line-height:1}
+.rate button .lbl{font-size:11px;font-weight:600;opacity:.85;margin-top:2px}
 .rate button.r0.on{background:#c33;color:#fff}
 .rate button.r1.on{background:#e0a020;color:#fff}
 .rate button.r2.on{background:#1f7a3a;color:#fff}
-.tabs{display:flex;gap:6px;margin-bottom:10px}
+.tabs{display:flex;gap:6px;margin-bottom:10px;position:sticky;top:0;background:#f4f6f8;padding:8px 0;z-index:2}
 .tabs button{flex:1;background:#dde;color:#223}
 .tabs button.active{background:#1f7a3a;color:#fff}
 .score{font-size:28px;font-weight:700;color:#1f7a3a}
-.hist{padding:10px;border:1px solid #dde;border-radius:8px;margin-bottom:8px;background:#fff;display:flex;justify-content:space-between;align-items:center;gap:8px}
-.hist .meta{font-size:13px;color:#456}
-.pill{display:inline-block;padding:2px 8px;border-radius:99px;background:#1f7a3a;color:#fff;font-size:12px;font-weight:700}
+.hist{padding:12px;border:1px solid #dde;border-radius:8px;margin-bottom:8px;background:#fff;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hist .meta{font-size:12px;color:#456;margin-top:2px}
+.pill{display:inline-block;padding:3px 10px;border-radius:99px;background:#1f7a3a;color:#fff;font-size:12px;font-weight:700}
 .err{color:#c33;margin-top:8px;font-size:13px}
 .hidden{display:none}
 .muted{color:#789;font-size:12px}
+/* Small phones */
+@media (max-width:360px){
+  header h1{font-size:14px}
+  header .who{font-size:11px}
+  .rate button{font-size:12px;padding:8px 2px}
+  .rate button .num{font-size:16px}
+  .rate button .lbl{display:none}
+}
 </style></head><body>
 
 <header>
@@ -355,7 +372,7 @@ button.sm{padding:6px 10px;font-size:13px}
     <div id="checklist" class="card">Loading items...</div>
 
     <div class="card">
-      <button id="submitBtn">Upload to Google Sheets</button>
+      <button id="submitBtn">Upload Checklist</button>
       <button id="resetBtn" class="ghost" style="margin-left:8px">Reset</button>
       <div id="subErr" class="err"></div>
     </div>
@@ -424,9 +441,9 @@ function renderChecklist(){
       return \`<div class="item">
         <div class="t">\${escapeHtml(it.item)}</div>
         <div class="rate">
-          <button class="r0 \${r==='0'?'on':''}" onclick="setRate('\${key}','0')">0 - Not complied</button>
-          <button class="r1 \${r==='1'?'on':''}" onclick="setRate('\${key}','1')">1 - Needs improvement</button>
-          <button class="r2 \${r==='2'?'on':''}" onclick="setRate('\${key}','2')">2 - Complied</button>
+          <button class="r0 \${r==='0'?'on':''}" onclick="setRate('\${key}','0')"><span class="num">0</span><span class="lbl">Not complied</span></button>
+          <button class="r1 \${r==='1'?'on':''}" onclick="setRate('\${key}','1')"><span class="num">1</span><span class="lbl">Needs improvement</span></button>
+          <button class="r2 \${r==='2'?'on':''}" onclick="setRate('\${key}','2')"><span class="num">2</span><span class="lbl">Complied</span></button>
         </div>
         <textarea placeholder="Remarks / notes (optional)" oninput="S.remarks['\${key}']=this.value">\${escapeHtml(S.remarks[key]||'')}</textarea>
       </div>\`;
@@ -465,7 +482,7 @@ $('#submitBtn').onclick = async () => {
   const btn = $('#submitBtn'); btn.disabled = true; btn.textContent = 'Uploading...';
   const r = await api('/api/submit', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({manager:S.manager, store, date, entries, auditId:S.editingId})});
-  btn.disabled = false; btn.textContent = 'Upload to Google Sheets';
+  btn.disabled = false; btn.textContent = 'Upload Checklist';
   if (!r.ok) { $('#subErr').textContent = r.error||'Failed'; return; }
   alert('Saved. Audit ID: ' + r.auditId);
   resetForm();

@@ -276,6 +276,7 @@ app.get('/api/summary', async (req, res) => {
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     const areaFilter = (req.query.area || '').trim();
+    const storeFilter = (req.query.store || '').trim();
     const isRegional = level === 'regional manager';
 
     const stores = await sheetsGet('ListOfStores!A2:G');
@@ -299,8 +300,20 @@ app.get('/api/summary', async (req, res) => {
       const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
       if (!isRegional && !managerAreas.has(areaOfRow)) return false;
       if (areaFilter && areaOfRow !== areaFilter) return false;
+      if (storeFilter && (r[3] || '') !== storeFilter) return false;
       return true;
     });
+
+    // Stores list for dropdown: respect manager access + area filter
+    const allowedStores = stores
+      .filter((r) => {
+        const areaName = r[2] || '(no area)';
+        const mgr = (r[6] || '').trim().toLowerCase();
+        if (!isRegional && mgr !== manager) return false;
+        if (areaFilter && areaName !== areaFilter) return false;
+        return !!r[4];
+      })
+      .map((r) => r[4]);
 
     const bucket = (obj, key) => (obj[key] = obj[key] || { r0: 0, r1: 0, r2: 0, total: 0 });
     const perStore = {}, perArea = {}, perItem = {};
@@ -322,9 +335,10 @@ app.get('/api/summary', async (req, res) => {
     res.json({
       ok: true,
       areas: allowedAreas.sort(),
+      stores: [...new Set(allowedStores)].sort(),
       perArea: Object.entries(perArea).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => a.name.localeCompare(b.name)),
       perStore: Object.entries(perStore).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name)),
-      worstItems: Object.entries(perItem).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => a.score - b.score).slice(0, 20),
+      allItems: Object.entries(perItem).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => a.score - b.score),
       auditCount: new Set(rows.map((r) => r[1])).size,
       itemCount: rows.length,
     });
@@ -456,6 +470,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
         <div><label>From</label><input id="sumFrom" type="date"/></div>
         <div><label>To</label><input id="sumTo" type="date"/></div>
         <div><label>Area</label><select id="sumArea"><option value="">All</option></select></div>
+        <div><label>Store</label><select id="sumStore"><option value="">All</option></select></div>
       </div>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button id="sumApply">Apply</button>
@@ -594,13 +609,18 @@ async function loadSummary(){
   $('#sumOut').innerHTML = '<div class="card muted">Loading...</div>';
   const qs = 'manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') +
              '&from=' + encodeURIComponent($('#sumFrom').value||'') + '&to=' + encodeURIComponent($('#sumTo').value||'') +
-             '&area=' + encodeURIComponent($('#sumArea').value||'');
+             '&area=' + encodeURIComponent($('#sumArea').value||'') +
+             '&store=' + encodeURIComponent($('#sumStore').value||'');
   const r = await api('/api/summary?' + qs);
   if (!r.ok){ $('#sumOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
   SUM = r;
-  // Populate area dropdown (keep current selection if still valid)
-  const cur = $('#sumArea').value;
-  $('#sumArea').innerHTML = '<option value="">All</option>' + r.areas.map(a=>\`<option value="\${escapeHtml(a)}" \${a===cur?'selected':''}>\${escapeHtml(a)}</option>\`).join('');
+  // Populate area + store dropdowns (keep current selection if still valid)
+  const curA = $('#sumArea').value;
+  $('#sumArea').innerHTML = '<option value="">All</option>' + r.areas.map(a=>\`<option value="\${escapeHtml(a)}" \${a===curA?'selected':''}>\${escapeHtml(a)}</option>\`).join('');
+  const curS = $('#sumStore').value;
+  const validStore = r.stores.includes(curS) ? curS : '';
+  if (!validStore && curS) $('#sumStore').value = '';
+  $('#sumStore').innerHTML = '<option value="">All</option>' + r.stores.map(s=>\`<option value="\${escapeHtml(s)}" \${s===validStore?'selected':''}>\${escapeHtml(s)}</option>\`).join('');
   $('#sumMeta').textContent = \`\${r.auditCount} audits, \${r.itemCount} rated items\`;
   const rowHtml = (rows) => rows.map(x => \`<tr>
     <td>\${escapeHtml(x.name)}\${x.area?' <span class="muted">('+escapeHtml(x.area)+')</span>':''}</td>
@@ -617,13 +637,14 @@ async function loadSummary(){
   $('#sumOut').innerHTML =
     (r.perArea.length ? tbl('Summary by Area', r.perArea) : '') +
     (r.perStore.length ? tbl('Summary by Store', r.perStore) : '') +
-    (r.worstItems.length ? tbl('Top 20 Items Needing Improvement (lowest score first)', r.worstItems) : '') ||
+    (r.allItems.length ? tbl('Item Summary - all particulars (lowest score first)', r.allItems) : '') ||
     '<div class="card muted">No data for this filter.</div>';
 }
 $('#sumApply').onclick = loadSummary;
 $('#sumFrom').onchange = loadSummary;
 $('#sumTo').onchange = loadSummary;
-$('#sumArea').onchange = loadSummary;
+$('#sumArea').onchange = () => { $('#sumStore').value=''; loadSummary(); };
+$('#sumStore').onchange = loadSummary;
 
 $('#sumExport').onclick = () => {
   if (!SUM){ alert('Load summary first'); return; }
@@ -638,11 +659,11 @@ $('#sumExport').onclick = () => {
   lines.push(['Fresh Focus 5 Checklist Summary']);
   lines.push(['Generated', new Date().toLocaleString()]);
   lines.push(['Manager', S.manager, 'Level', S.level]);
-  lines.push(['From', $('#sumFrom').value, 'To', $('#sumTo').value, 'Area', $('#sumArea').value||'All']);
+  lines.push(['From', $('#sumFrom').value, 'To', $('#sumTo').value, 'Area', $('#sumArea').value||'All', 'Store', $('#sumStore').value||'All']);
   lines.push([]);
   sec('Summary by Area', SUM.perArea, false);
   sec('Summary by Store', SUM.perStore, true);
-  sec('Top 20 Items Needing Improvement', SUM.worstItems, false);
+  sec('Item Summary - All Particulars', SUM.allItems, false);
   const csv = lines.map(row => row.map(csvEsc).join(',')).join('\\n');
   const blob = new Blob([\`\\ufeff\`+csv], {type:'text/csv;charset=utf-8'});
   const url = URL.createObjectURL(blob);

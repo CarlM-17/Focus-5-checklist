@@ -318,6 +318,7 @@ app.get('/api/summary', async (req, res) => {
     const bucket = (obj, key) => (obj[key] = obj[key] || { r0: 0, r1: 0, r2: 0, total: 0 });
     const perStore = {}, perArea = {}, perItem = {};
     rows.forEach((r) => {
+      if (r[5] === 'AUDIT NOTES') return; // skip general-notes rows in aggregates
       const store = r[3] || '(unknown)';
       const areaOfRow = (storeMap[store] || {}).area || '(unknown)';
       const itemKey = (r[5] || '') + ' | ' + (r[6] || '');
@@ -451,6 +452,11 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <div id="checklist" class="card">Loading items...</div>
 
     <div class="card">
+      <label style="font-weight:600;font-size:14px;color:#1f7a3a">General Notes</label>
+      <textarea id="generalNotes" placeholder="Overall observations, action items, follow-ups..." style="min-height:100px"></textarea>
+    </div>
+
+    <div class="card">
       <button id="submitBtn">Upload Checklist</button>
       <button id="resetBtn" class="ghost" style="margin-left:8px">Reset</button>
       <div id="subErr" class="err"></div>
@@ -575,6 +581,8 @@ $('#submitBtn').onclick = async () => {
     rating: S.ratings['k'+i] ?? '',
     remarks: S.remarks['k'+i] || ''
   }));
+  const notes = $('#generalNotes').value.trim();
+  if (notes) entries.push({ category:'AUDIT NOTES', item:'General Notes', rating:'', remarks: notes });
   const btn = $('#submitBtn'); btn.disabled = true; btn.textContent = 'Uploading...';
   const r = await api('/api/submit', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({manager:S.manager, store, date, entries, auditId:S.editingId})});
@@ -587,6 +595,7 @@ $('#submitBtn').onclick = async () => {
 $('#resetBtn').onclick = resetForm;
 function resetForm(){
   S.ratings = {}; S.remarks = {}; S.editingId = null;
+  $('#generalNotes').value = '';
   $('#editBanner').classList.add('hidden');
   renderChecklist();
 }
@@ -653,6 +662,15 @@ $('#sumExport').onclick = () => {
   const from  = $('#sumFrom').value, to = $('#sumTo').value;
   const dateStr = (from && to) ? (from === to ? from : from + ' to ' + to) : (from || to || 'All dates');
   const scoreBg = s => s>=80 ? '#1f7a3a' : s>=50 ? '#e0a020' : '#c33';
+  const storeRowsHtml = SUM.perStore.map(x => \`
+    <tr>
+      <td style="border:1px solid #b0b0b0;padding:6px 8px"><b>\${escapeHtml(x.name)}</b> <span style="color:#789">(\${escapeHtml(x.area||'')})</span></td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#c33;font-weight:bold">\${x.r0}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#b8860b;font-weight:bold">\${x.r1}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#1f7a3a;font-weight:bold">\${x.r2}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center">\${x.total}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${scoreBg(x.score)};color:#fff;font-weight:bold">\${x.score}%</td>
+    </tr>\`).join('');
   const rowsHtml = SUM.allItems.map(x => \`
     <tr>
       <td style="border:1px solid #b0b0b0;padding:6px 8px">\${escapeHtml(x.name)}</td>
@@ -673,6 +691,19 @@ $('#sumExport').onclick = () => {
     <tr><td style="padding:2px 8px;font-weight:bold">Date:</td><td style="padding:2px 8px">\${escapeHtml(dateStr)}</td></tr>
     <tr><td style="padding:2px 8px;font-weight:bold">Audited by:</td><td style="padding:2px 8px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
     <tr><td style="padding:2px 8px;font-weight:bold">Generated:</td><td style="padding:2px 8px">\${new Date().toLocaleString()}</td></tr>
+  </table>
+  <table style="border-collapse:collapse;font-size:12px;margin-bottom:14px">
+    <thead>
+      <tr style="background:#1f7a3a;color:#fff">
+        <th style="border:1px solid #b0b0b0;padding:8px;text-align:left;min-width:360px">Store</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">0</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">1</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">2</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:60px">Total</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:70px">Score</th>
+      </tr>
+    </thead>
+    <tbody>\${storeRowsHtml}</tbody>
   </table>
   <table style="border-collapse:collapse;font-size:12px">
     <thead>
@@ -721,6 +752,8 @@ async function editAudit(id){
   if (!r.ok) { alert(r.error||'Failed'); return; }
   S.editingId = id;
   S.ratings = {}; S.remarks = {};
+  const noteRow = r.items.find(it => it.category==='AUDIT NOTES' && it.item==='General Notes');
+  $('#generalNotes').value = noteRow ? (noteRow.remarks || '') : '';
   // Match items by category+item text
   const key = (c,i)=>c+'||'+i;
   const map = {};

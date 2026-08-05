@@ -269,6 +269,70 @@ app.get('/api/audit/:id', async (req, res) => {
   }
 });
 
+app.get('/api/summary', async (req, res) => {
+  try {
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    const level = (req.query.level || '').trim().toLowerCase();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const areaFilter = (req.query.area || '').trim();
+    const isRegional = level === 'regional manager';
+
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const storeMap = {};
+    const managerAreas = new Set();
+    stores.forEach((r) => {
+      const storeName = r[4], areaName = r[2] || '(no area)', mgr = r[6] || '';
+      if (!storeName) return;
+      storeMap[storeName] = { area: areaName, manager: mgr };
+      if (mgr.trim().toLowerCase() === manager) managerAreas.add(areaName);
+    });
+    const allowedAreas = isRegional
+      ? [...new Set(stores.map((r) => r[2] || '(no area)').filter(Boolean))]
+      : [...managerAreas];
+
+    const data = await sheetsGet('ChecklistData!A2:J');
+    const rows = data.filter((r) => {
+      if ((r[9] || 'ACTIVE') !== 'ACTIVE') return false;
+      if (from && (r[4] || '') < from) return false;
+      if (to && (r[4] || '') > to) return false;
+      const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
+      if (!isRegional && !managerAreas.has(areaOfRow)) return false;
+      if (areaFilter && areaOfRow !== areaFilter) return false;
+      return true;
+    });
+
+    const bucket = (obj, key) => (obj[key] = obj[key] || { r0: 0, r1: 0, r2: 0, total: 0 });
+    const perStore = {}, perArea = {}, perItem = {};
+    rows.forEach((r) => {
+      const store = r[3] || '(unknown)';
+      const areaOfRow = (storeMap[store] || {}).area || '(unknown)';
+      const itemKey = (r[5] || '') + ' | ' + (r[6] || '');
+      const s = bucket(perStore, store); s.area = areaOfRow;
+      const a = bucket(perArea, areaOfRow);
+      const it = bucket(perItem, itemKey);
+      const rating = r[7];
+      if (rating === '0') { s.r0++; a.r0++; it.r0++; }
+      else if (rating === '1') { s.r1++; a.r1++; it.r1++; }
+      else if (rating === '2') { s.r2++; a.r2++; it.r2++; }
+      s.total++; a.total++; it.total++;
+    });
+    const withScore = (o) => ({ ...o, score: o.total ? Math.round(((o.r1 + o.r2 * 2) / (o.total * 2)) * 100) : 0 });
+
+    res.json({
+      ok: true,
+      areas: allowedAreas.sort(),
+      perArea: Object.entries(perArea).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => a.name.localeCompare(b.name)),
+      perStore: Object.entries(perStore).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name)),
+      worstItems: Object.entries(perItem).map(([name, v]) => ({ name, ...withScore(v) })).sort((a, b) => a.score - b.score).slice(0, 20),
+      auditCount: new Set(rows.map((r) => r[1])).size,
+      itemCount: rows.length,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---------- Frontend ----------
@@ -351,6 +415,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
   <div class="tabs">
     <button data-tab="new" class="active">New Audit</button>
     <button data-tab="hist">History</button>
+    <button data-tab="sum">Summary</button>
   </div>
 
   <div id="tabNew">
@@ -383,6 +448,22 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
       <button id="reloadHist" class="ghost sm">Refresh</button>
       <div id="histList" style="margin-top:10px">Loading...</div>
     </div>
+  </div>
+
+  <div id="tabSum" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div><label>From</label><input id="sumFrom" type="date"/></div>
+        <div><label>To</label><input id="sumTo" type="date"/></div>
+        <div><label>Area</label><select id="sumArea"><option value="">All</option></select></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button id="sumApply">Apply</button>
+        <button id="sumExport" class="ghost">Export to Excel</button>
+      </div>
+      <div id="sumMeta" class="muted" style="margin-top:8px"></div>
+    </div>
+    <div id="sumOut"></div>
   </div>
 </div>
 
@@ -502,8 +583,75 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   const t = b.dataset.tab;
   $('#tabNew').classList.toggle('hidden', t!=='new');
   $('#tabHist').classList.toggle('hidden', t!=='hist');
+  $('#tabSum').classList.toggle('hidden', t!=='sum');
   if (t==='hist') loadHistory();
+  if (t==='sum') { if(!$('#sumFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-30); $('#sumFrom').value=d.toISOString().slice(0,10); $('#sumTo').value=to; } loadSummary(); }
 });
+
+// ---- Summary ----
+let SUM = null;
+async function loadSummary(){
+  $('#sumOut').innerHTML = '<div class="card muted">Loading...</div>';
+  const qs = 'manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') +
+             '&from=' + encodeURIComponent($('#sumFrom').value||'') + '&to=' + encodeURIComponent($('#sumTo').value||'') +
+             '&area=' + encodeURIComponent($('#sumArea').value||'');
+  const r = await api('/api/summary?' + qs);
+  if (!r.ok){ $('#sumOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  SUM = r;
+  // Populate area dropdown (keep current selection if still valid)
+  const cur = $('#sumArea').value;
+  $('#sumArea').innerHTML = '<option value="">All</option>' + r.areas.map(a=>\`<option value="\${escapeHtml(a)}" \${a===cur?'selected':''}>\${escapeHtml(a)}</option>\`).join('');
+  $('#sumMeta').textContent = \`\${r.auditCount} audits, \${r.itemCount} rated items\`;
+  const rowHtml = (rows) => rows.map(x => \`<tr>
+    <td>\${escapeHtml(x.name)}\${x.area?' <span class="muted">('+escapeHtml(x.area)+')</span>':''}</td>
+    <td style="color:#c33;font-weight:700;text-align:center">\${x.r0}</td>
+    <td style="color:#b8860b;font-weight:700;text-align:center">\${x.r1}</td>
+    <td style="color:#1f7a3a;font-weight:700;text-align:center">\${x.r2}</td>
+    <td style="text-align:center">\${x.total}</td>
+    <td style="text-align:right"><span class="pill" style="background:\${x.score>=80?'#1f7a3a':x.score>=50?'#e0a020':'#c33'}">\${x.score}%</span></td>
+  </tr>\`).join('');
+  const tbl = (title, rows) => \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">\${title}</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Name</th><th style="padding:6px">0</th><th style="padding:6px">1</th><th style="padding:6px">2</th><th style="padding:6px">Total</th><th style="padding:6px;text-align:right">Score</th></tr></thead>
+    <tbody>\${rowHtml(rows)}</tbody></table></div></div>\`;
+  $('#sumOut').innerHTML =
+    (r.perArea.length ? tbl('Summary by Area', r.perArea) : '') +
+    (r.perStore.length ? tbl('Summary by Store', r.perStore) : '') +
+    (r.worstItems.length ? tbl('Top 20 Items Needing Improvement (lowest score first)', r.worstItems) : '') ||
+    '<div class="card muted">No data for this filter.</div>';
+}
+$('#sumApply').onclick = loadSummary;
+$('#sumFrom').onchange = loadSummary;
+$('#sumTo').onchange = loadSummary;
+$('#sumArea').onchange = loadSummary;
+
+$('#sumExport').onclick = () => {
+  if (!SUM){ alert('Load summary first'); return; }
+  const csvEsc = v => { const s=String(v==null?'':v); return /[",\\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const lines = [];
+  const sec = (title, rows, showArea) => {
+    lines.push([title]);
+    lines.push(showArea ? ['Name','Area','0','1','2','Total','Score %'] : ['Name','0','1','2','Total','Score %']);
+    rows.forEach(x => lines.push(showArea ? [x.name,x.area||'',x.r0,x.r1,x.r2,x.total,x.score] : [x.name,x.r0,x.r1,x.r2,x.total,x.score]));
+    lines.push([]);
+  };
+  lines.push(['Fresh Focus 5 Checklist Summary']);
+  lines.push(['Generated', new Date().toLocaleString()]);
+  lines.push(['Manager', S.manager, 'Level', S.level]);
+  lines.push(['From', $('#sumFrom').value, 'To', $('#sumTo').value, 'Area', $('#sumArea').value||'All']);
+  lines.push([]);
+  sec('Summary by Area', SUM.perArea, false);
+  sec('Summary by Store', SUM.perStore, true);
+  sec('Top 20 Items Needing Improvement', SUM.worstItems, false);
+  const csv = lines.map(row => row.map(csvEsc).join(',')).join('\\n');
+  const blob = new Blob([\`\\ufeff\`+csv], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'FreshFocus5_Summary_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
 
 async function loadHistory(){
   $('#histList').textContent = 'Loading...';

@@ -648,28 +648,51 @@ $('#sumStore').onchange = loadSummary;
 
 $('#sumExport').onclick = () => {
   if (!SUM){ alert('Load summary first'); return; }
-  const csvEsc = v => { const s=String(v==null?'':v); return /[",\\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
-  const lines = [];
-  const sec = (title, rows, showArea) => {
-    lines.push([title]);
-    lines.push(showArea ? ['Name','Area','0','1','2','Total','Score %'] : ['Name','0','1','2','Total','Score %']);
-    rows.forEach(x => lines.push(showArea ? [x.name,x.area||'',x.r0,x.r1,x.r2,x.total,x.score] : [x.name,x.r0,x.r1,x.r2,x.total,x.score]));
-    lines.push([]);
-  };
-  lines.push(['Fresh Focus 5 Checklist Summary']);
-  lines.push(['Generated', new Date().toLocaleString()]);
-  lines.push(['Manager', S.manager, 'Level', S.level]);
-  lines.push(['From', $('#sumFrom').value, 'To', $('#sumTo').value, 'Area', $('#sumArea').value||'All', 'Store', $('#sumStore').value||'All']);
-  lines.push([]);
-  sec('Summary by Area', SUM.perArea, false);
-  sec('Summary by Store', SUM.perStore, true);
-  sec('Item Summary - All Particulars', SUM.allItems, false);
-  const csv = lines.map(row => row.map(csvEsc).join(',')).join('\\n');
-  const blob = new Blob([\`\\ufeff\`+csv], {type:'text/csv;charset=utf-8'});
+  const store = $('#sumStore').value || 'All Stores';
+  const area  = $('#sumArea').value  || 'All Areas';
+  const from  = $('#sumFrom').value, to = $('#sumTo').value;
+  const dateStr = (from && to) ? (from === to ? from : from + ' to ' + to) : (from || to || 'All dates');
+  const scoreBg = s => s>=80 ? '#1f7a3a' : s>=50 ? '#e0a020' : '#c33';
+  const rowsHtml = SUM.allItems.map(x => \`
+    <tr>
+      <td style="border:1px solid #b0b0b0;padding:6px 8px">\${escapeHtml(x.name)}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#c33;font-weight:bold">\${x.r0}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#b8860b;font-weight:bold">\${x.r1}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#1f7a3a;font-weight:bold">\${x.r2}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center">\${x.total}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${scoreBg(x.score)};color:#fff;font-weight:bold">\${x.score}%</td>
+    </tr>\`).join('');
+  const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8">
+<xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Fresh Compliance</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml>
+</head><body style="font-family:Calibri,Arial,sans-serif">
+  <h1 style="color:#1f7a3a;text-align:center;margin:0 0 12px">Fresh Compliance Result</h1>
+  <table style="margin-bottom:14px;font-size:13px">
+    <tr><td style="padding:2px 8px;font-weight:bold">Store:</td><td style="padding:2px 8px">\${escapeHtml(store)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Area:</td><td style="padding:2px 8px">\${escapeHtml(area)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Date:</td><td style="padding:2px 8px">\${escapeHtml(dateStr)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Audited by:</td><td style="padding:2px 8px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Generated:</td><td style="padding:2px 8px">\${new Date().toLocaleString()}</td></tr>
+  </table>
+  <table style="border-collapse:collapse;font-size:12px">
+    <thead>
+      <tr style="background:#1f7a3a;color:#fff">
+        <th style="border:1px solid #b0b0b0;padding:8px;text-align:left;min-width:360px">Name</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">0</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">1</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:50px">2</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:60px">Total</th>
+        <th style="border:1px solid #b0b0b0;padding:8px;width:70px">Score</th>
+      </tr>
+    </thead>
+    <tbody>\${rowsHtml}</tbody>
+  </table>
+</body></html>\`;
+  const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'FreshFocus5_Summary_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.download = 'Fresh_Compliance_Result_' + new Date().toISOString().slice(0,10) + '.xls';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };

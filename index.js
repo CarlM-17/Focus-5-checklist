@@ -125,15 +125,38 @@ async function sheetsBatchUpdateValues(data) {
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
+    const uLc = (username || '').trim().toLowerCase();
+    // 1) AreaManagers
     const rows = await sheetsGet('AreaManagers!A2:C');
     const found = rows.find(
-      (r) =>
-        (r[0] || '').trim().toLowerCase() === (username || '').trim().toLowerCase() &&
-        String(r[1] || '') === String(password || '')
+      (r) => (r[0] || '').trim().toLowerCase() === uLc && String(r[1] || '') === String(password || '')
     );
-    if (!found) return res.json({ ok: false, error: 'Invalid username or password' });
-    const level = (found[2] || 'Area Manager').trim();
-    res.json({ ok: true, manager: found[0], level });
+    if (found) {
+      const level = (found[2] || 'Area Manager').trim();
+      return res.json({ ok: true, manager: found[0], level });
+    }
+    // 2) StoreManagers: A=Store ID (username), B=Display name, C=Password
+    const smRows = await sheetsGet('StoreManagers!A2:C');
+    const sm = smRows.find(
+      (r) => String(r[0] || '').trim().toLowerCase() === uLc && String(r[2] || '') === String(password || '')
+    );
+    if (sm) {
+      const storeId = String(sm[0] || '').trim();
+      const displayName = String(sm[1] || '').trim();
+      const stores = await sheetsGet('ListOfStores!A2:G');
+      const storeRow = stores.find((r) => String(r[3] || '').trim() === storeId);
+      const storeName = storeRow ? (storeRow[4] || '').trim() : displayName || storeId;
+      const area = storeRow ? (storeRow[2] || '').trim() : '';
+      return res.json({
+        ok: true,
+        manager: displayName || storeId,
+        level: 'Store Manager',
+        storeId,
+        storeName,
+        area,
+      });
+    }
+    return res.json({ ok: false, error: 'Invalid username or password' });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -211,12 +234,15 @@ app.get('/api/history', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
     const level = (req.query.level || '').trim().toLowerCase();
+    const storeFilter = (req.query.store || '').trim();
     const isRegional = level === 'regional manager';
+    const isStoreMgr = level === 'store manager';
     const rows = await sheetsGet('ChecklistData!A2:J');
     const map = new Map();
     rows.forEach((r) => {
       if ((r[9] || 'ACTIVE') !== 'ACTIVE') return;
-      if (!isRegional && manager && (r[2] || '').trim().toLowerCase() !== manager) return;
+      if (storeFilter && r[3] !== storeFilter) return;
+      if (!isRegional && !isStoreMgr && manager && (r[2] || '').trim().toLowerCase() !== manager) return;
       const id = r[1];
       if (!id) return;
       if (!map.has(id)) {
@@ -348,6 +374,235 @@ app.get('/api/summary', async (req, res) => {
   }
 });
 
+// ---------- Store Manager (Y/N 3x-daily) ----------
+async function markStoreEdited(auditId, store, date, slot) {
+  const rows = await sheetsGet('StoreChecklistData!A2:K');
+  const data = [];
+  rows.forEach((r, i) => {
+    const isActive = (r[10] || 'ACTIVE') === 'ACTIVE';
+    if (!isActive) return;
+    // Match by auditId OR by same store+date+slot (replace prior slot submission)
+    const match = auditId
+      ? r[1] === auditId
+      : (r[3] === store && r[4] === date && r[5] === slot);
+    if (match) data.push({ range: `StoreChecklistData!K${i + 2}`, values: [['EDITED']] });
+  });
+  if (data.length) await sheetsBatchUpdateValues(data);
+}
+
+app.post('/api/store-submit', async (req, res) => {
+  try {
+    const { login, store, date, slot, entries, auditId, generalNotes } = req.body || {};
+    if (!login || !store || !date || !slot || !Array.isArray(entries) || !entries.length) {
+      return res.json({ ok: false, error: 'Missing fields' });
+    }
+    const ts = new Date().toISOString();
+    const id = auditId || 'S' + Date.now();
+    // Supersede any earlier active submission for same store/date/slot (or the same auditId when editing)
+    await markStoreEdited(auditId, store, date, slot);
+    const rows = entries.map((e) => [
+      ts, id, login, store, date, slot,
+      e.category || '', e.item || '',
+      String(e.result || ''),
+      e.remarks || '',
+      'ACTIVE',
+    ]);
+    if (generalNotes && generalNotes.trim()) {
+      rows.push([ts, id, login, store, date, slot, 'AUDIT NOTES', 'General Notes', '', generalNotes.trim(), 'ACTIVE']);
+    }
+    await sheetsAppend('StoreChecklistData!A:K', rows);
+    res.json({ ok: true, auditId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/store-history', async (req, res) => {
+  try {
+    const store = (req.query.store || '').trim();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const rows = await sheetsGet('StoreChecklistData!A2:K');
+    const map = new Map();
+    rows.forEach((r) => {
+      if ((r[10] || 'ACTIVE') !== 'ACTIVE') return;
+      if (store && r[3] !== store) return;
+      if (from && (r[4] || '') < from) return;
+      if (to && (r[4] || '') > to) return;
+      const id = r[1];
+      if (!id) return;
+      if (!map.has(id)) {
+        map.set(id, { auditId: id, timestamp: r[0], login: r[2], store: r[3], date: r[4], slot: r[5], y: 0, n: 0, total: 0 });
+      }
+      const a = map.get(id);
+      if (r[6] === 'AUDIT NOTES') return;
+      const result = String(r[8] || '').toUpperCase();
+      if (result === 'Y') a.y++;
+      else if (result === 'N') a.n++;
+      a.total++;
+    });
+    const list = [...map.values()].map((a) => ({
+      ...a,
+      pass: a.total ? Math.round((a.y / a.total) * 100) : 0,
+    }));
+    list.sort((a, b) => (b.date + b.slot).localeCompare(a.date + a.slot));
+    res.json({ ok: true, audits: list });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/store-audit/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const rows = await sheetsGet('StoreChecklistData!A2:K');
+    const entries = rows.filter((r) => r[1] === id && (r[10] || 'ACTIVE') === 'ACTIVE');
+    if (!entries.length) return res.json({ ok: false, error: 'Not found' });
+    const meta = { auditId: id, login: entries[0][2], store: entries[0][3], date: entries[0][4], slot: entries[0][5] };
+    const items = entries.map((r) => ({ category: r[6], item: r[7], result: r[8], remarks: r[9] }));
+    res.json({ ok: true, meta, items });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/store-compliance', async (req, res) => {
+  try {
+    const store = (req.query.store || '').trim();
+    const days = Math.min(60, parseInt(req.query.days || '14', 10) || 14);
+    const from = new Date(); from.setDate(from.getDate() - (days - 1));
+    const fromStr = from.toISOString().slice(0, 10);
+    const rows = await sheetsGet('StoreChecklistData!A2:K');
+    // per date -> per slot -> {y,total}
+    const byDate = {};
+    rows.forEach((r) => {
+      if ((r[10] || 'ACTIVE') !== 'ACTIVE') return;
+      if (store && r[3] !== store) return;
+      const d = r[4]; if (!d || d < fromStr) return;
+      const slot = r[5];
+      if (!byDate[d]) byDate[d] = {};
+      if (!byDate[d][slot]) byDate[d][slot] = { y: 0, n: 0, total: 0 };
+      if (r[6] === 'AUDIT NOTES') return;
+      const result = String(r[8] || '').toUpperCase();
+      if (result === 'Y') byDate[d][slot].y++;
+      else if (result === 'N') byDate[d][slot].n++;
+      byDate[d][slot].total++;
+    });
+    // Build calendar for last N days (newest first)
+    const out = [];
+    for (let i = 0; i < days; i++) {
+      const dt = new Date(); dt.setDate(dt.getDate() - i);
+      const d = dt.toISOString().slice(0, 10);
+      const slots = byDate[d] || {};
+      const built = ['8AM', '12PM', '3PM'].map((s) => {
+        const v = slots[s];
+        if (!v) return { slot: s, done: false, pass: null, y: 0, total: 0 };
+        return { slot: s, done: true, pass: v.total ? Math.round((v.y / v.total) * 100) : 0, y: v.y, total: v.total };
+      });
+      const doneCount = built.filter((x) => x.done).length;
+      out.push({ date: d, slots: built, slotCompliance: Math.round((doneCount / 3) * 100), doneCount });
+    }
+    res.json({ ok: true, days: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/store-checks-monitor', async (req, res) => {
+  try {
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    const level = (req.query.level || '').trim().toLowerCase();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const areaFilter = (req.query.area || '').trim();
+    const storeFilter = (req.query.store || '').trim();
+    const isRegional = level === 'regional manager';
+
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const storeMap = {};
+    const managerAreas = new Set();
+    stores.forEach((r) => {
+      const storeName = r[4], areaName = r[2] || '(no area)', mgr = r[6] || '';
+      if (!storeName) return;
+      storeMap[storeName] = { area: areaName };
+      if (mgr.trim().toLowerCase() === manager) managerAreas.add(areaName);
+    });
+    const allowedAreas = isRegional
+      ? [...new Set(stores.map((r) => r[2] || '(no area)').filter(Boolean))]
+      : [...managerAreas];
+    const allowedStores = stores
+      .filter((r) => {
+        const areaName = r[2] || '(no area)';
+        if (!isRegional && (r[6] || '').trim().toLowerCase() !== manager) return false;
+        if (areaFilter && areaName !== areaFilter) return false;
+        return !!r[4];
+      })
+      .map((r) => r[4]);
+
+    const data = await sheetsGet('StoreChecklistData!A2:K');
+    const rows = data.filter((r) => {
+      if ((r[10] || 'ACTIVE') !== 'ACTIVE') return false;
+      if (from && (r[4] || '') < from) return false;
+      if (to && (r[4] || '') > to) return false;
+      const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
+      if (!isRegional && !managerAreas.has(areaOfRow)) return false;
+      if (areaFilter && areaOfRow !== areaFilter) return false;
+      if (storeFilter && r[3] !== storeFilter) return false;
+      return true;
+    });
+
+    // per-store: distinct (date,slot) submitted / (unique date × 3)
+    const perStore = {};
+    const perItem = {};
+    const slotSet = {}; // store -> set of "date|slot"
+    const dateSet = {}; // store -> set of dates
+    rows.forEach((r) => {
+      const store = r[3] || '(unknown)';
+      const areaOfRow = (storeMap[store] || {}).area || '(unknown)';
+      const d = r[4] || '', slot = r[5] || '';
+      slotSet[store] = slotSet[store] || new Set();
+      dateSet[store] = dateSet[store] || new Set();
+      if (d) dateSet[store].add(d);
+      if (d && slot) slotSet[store].add(d + '|' + slot);
+      if (r[6] === 'AUDIT NOTES') return;
+      if (!perStore[store]) perStore[store] = { y: 0, n: 0, total: 0, area: areaOfRow };
+      const s = perStore[store];
+      const result = String(r[8] || '').toUpperCase();
+      if (result === 'Y') s.y++;
+      else if (result === 'N') s.n++;
+      s.total++;
+      const itemKey = (r[6] || '') + ' | ' + (r[7] || '');
+      const it = perItem[itemKey] = perItem[itemKey] || { y: 0, n: 0, total: 0 };
+      if (result === 'Y') it.y++;
+      else if (result === 'N') it.n++;
+      it.total++;
+    });
+
+    const perStoreArr = Object.entries(perStore).map(([name, v]) => {
+      const dates = dateSet[name] ? dateSet[name].size : 0;
+      const slotsDone = slotSet[name] ? slotSet[name].size : 0;
+      const slotCompliance = dates ? Math.round((slotsDone / (dates * 3)) * 100) : 0;
+      const pass = v.total ? Math.round((v.y / v.total) * 100) : 0;
+      return { name, area: v.area, y: v.y, n: v.n, total: v.total, slotCompliance, pass, dates, slotsDone };
+    }).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name));
+
+    const perItemArr = Object.entries(perItem).map(([name, v]) => ({
+      name, y: v.y, n: v.n, total: v.total, pass: v.total ? Math.round((v.y / v.total) * 100) : 0,
+    })).sort((a, b) => a.pass - b.pass);
+
+    res.json({
+      ok: true,
+      areas: allowedAreas.sort(),
+      stores: [...new Set(allowedStores)].sort(),
+      perStore: perStoreArr,
+      perItem: perItemArr,
+      auditCount: new Set(rows.map((r) => r[1])).size,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---------- Frontend ----------
@@ -431,6 +686,9 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <button data-tab="new" class="active">New Audit</button>
     <button data-tab="hist">History</button>
     <button data-tab="sum">Summary</button>
+    <button data-tab="mon">Store Checks</button>
+    <button data-tab="scheck">Store Check</button>
+    <button data-tab="clog">Compliance Log</button>
   </div>
 
   <div id="tabNew">
@@ -486,12 +744,70 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     </div>
     <div id="sumOut"></div>
   </div>
+
+  <div id="tabMon" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div><label>From</label><input id="monFrom" type="date"/></div>
+        <div><label>To</label><input id="monTo" type="date"/></div>
+        <div><label>Area</label><select id="monArea"><option value="">All</option></select></div>
+        <div><label>Store</label><select id="monStore"><option value="">All</option></select></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button id="monApply">Apply</button>
+        <button id="monExport" class="ghost">Export to Excel</button>
+      </div>
+      <div id="monMeta" class="muted" style="margin-top:8px"></div>
+    </div>
+    <div id="monOut"></div>
+  </div>
+
+  <div id="tabSCheck" class="hidden">
+    <div class="card">
+      <div style="font-weight:600;color:#1f7a3a">Store: <span id="scStoreLbl"></span></div>
+      <div style="margin-top:8px" class="row">
+        <div><label>Date</label><input id="scDate" type="date"/></div>
+        <div>
+          <label>Slot</label>
+          <div style="display:flex;gap:6px">
+            <button type="button" class="ghost sm" data-slot="8AM">8AM</button>
+            <button type="button" class="ghost sm" data-slot="12PM">12PM</button>
+            <button type="button" class="ghost sm" data-slot="3PM">3PM</button>
+          </div>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:6px">Current slot: <b id="scSlotLbl">-</b> - Pass rate: <span id="scScore" class="score" style="font-size:22px">0%</span> <span id="scScoreDetail"></span></div>
+    </div>
+
+    <div id="scChecklist" class="card">Loading items...</div>
+
+    <div class="card">
+      <label style="font-weight:600;font-size:14px;color:#1f7a3a">General Notes</label>
+      <textarea id="scNotes" placeholder="Overall observations..." style="min-height:80px"></textarea>
+    </div>
+
+    <div class="card">
+      <button id="scSubmit">Upload Store Check</button>
+      <button id="scReset" class="ghost" style="margin-left:8px">Reset</button>
+      <div id="scErr" class="err"></div>
+    </div>
+  </div>
+
+  <div id="tabCLog" class="hidden">
+    <div class="card">
+      <div style="font-weight:600;color:#1f7a3a">Store: <span id="clStoreLbl"></span></div>
+      <div class="muted" style="margin-top:4px">Last 14 days - 3 slots per day (8AM, 12PM, 3PM)</div>
+      <button id="clReload" class="ghost sm" style="margin-top:8px">Refresh</button>
+    </div>
+    <div id="clOut"></div>
+  </div>
 </div>
 
 </main>
 
 <script>
-const S = { manager:null, level:null, particulars:[], ratings:{}, remarks:{}, editingId:null };
+const S = { manager:null, level:null, storeId:null, storeName:null, particulars:[], ratings:{}, remarks:{}, editingId:null,
+            scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null };
 
 function $(q){return document.querySelector(q)}
 function api(url, opts){ return fetch(url, opts).then(r=>r.json()) }
@@ -503,12 +819,15 @@ $('#loginBtn').onclick = async () => {
   const r = await api('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p})});
   if (!r.ok) { $('#loginErr').textContent = r.error || 'Login failed'; return; }
   S.manager = r.manager; S.level = r.level || 'Area Manager';
+  S.storeId = r.storeId || null; S.storeName = r.storeName || null;
   localStorage.setItem('ff5_mgr', r.manager);
   localStorage.setItem('ff5_lvl', S.level);
+  if (S.storeId) localStorage.setItem('ff5_sid', S.storeId); else localStorage.removeItem('ff5_sid');
+  if (S.storeName) localStorage.setItem('ff5_sname', S.storeName); else localStorage.removeItem('ff5_sname');
   await enterApp();
 };
 
-$('#logoutBtn').onclick = () => { localStorage.removeItem('ff5_mgr'); localStorage.removeItem('ff5_lvl'); location.reload(); };
+$('#logoutBtn').onclick = () => { ['ff5_mgr','ff5_lvl','ff5_sid','ff5_sname'].forEach(k=>localStorage.removeItem(k)); location.reload(); };
 
 async function enterApp(){
   $('#loginScreen').classList.add('hidden');
@@ -516,9 +835,53 @@ async function enterApp(){
   $('#logoutBtn').classList.remove('hidden');
   $('#whoName').textContent = S.manager + ' (' + S.level + ')';
   $('#date').value = new Date().toISOString().slice(0,10);
-  await Promise.all([loadStores(), loadParticulars()]);
-  renderChecklist();
+  applyRoleUI();
+  await loadParticulars();
+  const isStoreMgr = (S.level||'').toLowerCase() === 'store manager';
+  if (isStoreMgr) {
+    $('#scStoreLbl').textContent = S.storeName || '';
+    $('#clStoreLbl').textContent = S.storeName || '';
+    $('#scDate').value = new Date().toISOString().slice(0,10);
+    S.scSlot = autoSlot();
+    highlightSlotBtn();
+    $('#scSlotLbl').textContent = S.scSlot;
+    renderStoreCheck();
+    // Open Store Check by default
+    document.querySelector('.tabs button[data-tab="scheck"]').click();
+  } else {
+    await loadStores();
+    renderChecklist();
+  }
 }
+
+function applyRoleUI(){
+  const isStoreMgr = (S.level||'').toLowerCase() === 'store manager';
+  // Hide/show tabs by role
+  const show = (sel, on) => document.querySelector(sel) && document.querySelector(sel).classList.toggle('hidden', !on);
+  show('.tabs button[data-tab="new"]',  !isStoreMgr);
+  show('.tabs button[data-tab="hist"]', true);
+  show('.tabs button[data-tab="sum"]',  true);
+  show('.tabs button[data-tab="mon"]',  !isStoreMgr);
+  show('.tabs button[data-tab="scheck"]', isStoreMgr);
+  show('.tabs button[data-tab="clog"]',   isStoreMgr);
+}
+
+function autoSlot(){
+  const h = new Date().getHours();
+  if (h >= 5 && h < 11) return '8AM';
+  if (h >= 11 && h < 14) return '12PM';
+  return '3PM';
+}
+function highlightSlotBtn(){
+  document.querySelectorAll('#tabSCheck button[data-slot]').forEach(b => {
+    b.classList.toggle('active', b.dataset.slot === S.scSlot);
+    b.style.background = b.dataset.slot === S.scSlot ? '#1f7a3a' : '';
+    b.style.color = b.dataset.slot === S.scSlot ? '#fff' : '';
+  });
+}
+document.querySelectorAll('#tabSCheck button[data-slot]').forEach(b => b.onclick = () => {
+  S.scSlot = b.dataset.slot; $('#scSlotLbl').textContent = S.scSlot; highlightSlotBtn();
+});
 
 async function loadStores(){
   const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
@@ -608,8 +971,13 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabNew').classList.toggle('hidden', t!=='new');
   $('#tabHist').classList.toggle('hidden', t!=='hist');
   $('#tabSum').classList.toggle('hidden', t!=='sum');
+  $('#tabMon').classList.toggle('hidden', t!=='mon');
+  $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
+  $('#tabCLog').classList.toggle('hidden', t!=='clog');
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-30); $('#sumFrom').value=d.toISOString().slice(0,10); $('#sumTo').value=to; } loadSummary(); }
+  if (t==='mon') { if(!$('#monFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-14); $('#monFrom').value=d.toISOString().slice(0,10); $('#monTo').value=to; } loadMonitor(); }
+  if (t==='clog') loadCompliance();
 });
 
 // ---- Summary ----
@@ -619,7 +987,7 @@ async function loadSummary(){
   const qs = 'manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') +
              '&from=' + encodeURIComponent($('#sumFrom').value||'') + '&to=' + encodeURIComponent($('#sumTo').value||'') +
              '&area=' + encodeURIComponent($('#sumArea').value||'') +
-             '&store=' + encodeURIComponent($('#sumStore').value||'');
+             '&store=' + encodeURIComponent(((S.level||'').toLowerCase()==='store manager' && S.storeName) ? S.storeName : ($('#sumStore').value||''));
   const r = await api('/api/summary?' + qs);
   if (!r.ok){ $('#sumOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
   SUM = r;
@@ -730,7 +1098,8 @@ $('#sumExport').onclick = () => {
 
 async function loadHistory(){
   $('#histList').textContent = 'Loading...';
-  const r = await api('/api/history?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
+  const storeQ = ((S.level||'').toLowerCase()==='store manager' && S.storeName) ? '&store=' + encodeURIComponent(S.storeName) : '';
+  const r = await api('/api/history?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + storeQ);
   if (!r.ok) { $('#histList').textContent = r.error||'Failed'; return; }
   if (!r.audits.length) { $('#histList').textContent = 'No audits yet.'; return; }
   $('#histList').innerHTML = r.audits.map(a => \`
@@ -741,7 +1110,7 @@ async function loadHistory(){
       </div>
       <div style="text-align:right">
         <div class="pill">\${a.score}%</div>
-        <div style="margin-top:6px"><button class="sm ghost" onclick="editAudit('\${a.auditId}')">Edit</button></div>
+        <div style="margin-top:6px" class="\${(S.level||'').toLowerCase()==='store manager'?'hidden':''}"><button class="sm ghost" onclick="editAudit('\${a.auditId}')">Edit</button></div>
       </div>
     </div>\`).join('');
 }
@@ -771,9 +1140,190 @@ async function editAudit(id){
   renderChecklist();
 }
 
+// ---- Store Check (Y/N) ----
+function renderStoreCheck(){
+  const groups = {};
+  S.particulars.forEach((p,i) => { (groups[p.category] = groups[p.category] || []).push({...p,i}); });
+  const html = Object.keys(groups).map(cat => {
+    const items = groups[cat].map(it => {
+      const key = 'k'+it.i;
+      const r = S.scResults[key];
+      return \`<div class="item">
+        <div class="t">\${escapeHtml(it.item)}</div>
+        <div class="rate" style="grid-template-columns:1fr 1fr">
+          <button class="r2 \${r==='Y'?'on':''}" onclick="setResult('\${key}','Y')"><span class="num">&#10004;</span><span class="lbl">Pass</span></button>
+          <button class="r0 \${r==='N'?'on':''}" onclick="setResult('\${key}','N')"><span class="num">&#10008;</span><span class="lbl">Fail</span></button>
+        </div>
+        <textarea placeholder="Remarks (optional)" oninput="S.scRemarks['\${key}']=this.value">\${escapeHtml(S.scRemarks[key]||'')}</textarea>
+      </div>\`;
+    }).join('');
+    return \`<div class="cat">\${escapeHtml(cat)}</div>\${items}\`;
+  }).join('');
+  $('#scChecklist').innerHTML = html || '<div class="muted">No items.</div>';
+  updateScScore();
+}
+function setResult(key, val){ S.scResults[key] = val; renderStoreCheck(); }
+function updateScScore(){
+  let y=0, total=0;
+  Object.values(S.scResults).forEach(v => { if(v==='Y'){y++;total++;} else if(v==='N'){total++;} });
+  const pct = total ? Math.round(y/total*100) : 0;
+  $('#scScore').textContent = pct + '%';
+  $('#scScoreDetail').textContent = \` (\${total}/\${S.particulars.length} rated)\`;
+}
+$('#scSubmit').onclick = async () => {
+  $('#scErr').textContent = '';
+  const date = $('#scDate').value;
+  if (!date || !S.scSlot) { $('#scErr').textContent = 'Date and slot required'; return; }
+  const entries = S.particulars.map((p,i) => ({ category:p.category, item:p.item, result:S.scResults['k'+i]||'', remarks:S.scRemarks['k'+i]||'' }));
+  const btn = $('#scSubmit'); btn.disabled = true; btn.textContent = 'Uploading...';
+  const r = await api('/api/store-submit', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ login:S.manager, store:S.storeName, date, slot:S.scSlot, entries, auditId:S.scEditingId, generalNotes:$('#scNotes').value })});
+  btn.disabled = false; btn.textContent = 'Upload Store Check';
+  if (!r.ok) { $('#scErr').textContent = r.error||'Failed'; return; }
+  alert('Store check saved. ID: ' + r.auditId);
+  scResetForm();
+};
+$('#scReset').onclick = scResetForm;
+function scResetForm(){
+  S.scResults = {}; S.scRemarks = {}; S.scEditingId = null;
+  $('#scNotes').value = '';
+  renderStoreCheck();
+}
+
+// ---- Compliance Log ----
+async function loadCompliance(){
+  $('#clOut').innerHTML = '<div class="card muted">Loading...</div>';
+  const r = await api('/api/store-compliance?store=' + encodeURIComponent(S.storeName||'') + '&days=14');
+  if (!r.ok){ $('#clOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  const rows = r.days.map(d => {
+    const cells = d.slots.map(s => {
+      if (!s.done) return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:8px;border:1px solid #eee">MISSED</td>\`;
+      const bg = s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee';
+      const col = s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
+      return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:8px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
+    }).join('');
+    const compBg = d.doneCount===3?'#1f7a3a':d.doneCount>=1?'#e0a020':'#c33';
+    return \`<tr>
+      <td style="padding:8px;border:1px solid #eee;font-weight:600">\${d.date}</td>
+      \${cells}
+      <td style="text-align:center;padding:8px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${d.slotCompliance}%</span></td>
+    </tr>\`;
+  }).join('');
+  $('#clOut').innerHTML = \`<div class="card"><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="background:#eef"><th style="padding:8px;text-align:left">Date</th><th style="padding:8px">8AM</th><th style="padding:8px">12PM</th><th style="padding:8px">3PM</th><th style="padding:8px">Slot %</th></tr></thead>
+    <tbody>\${rows}</tbody></table></div></div>\`;
+}
+$('#clReload').onclick = loadCompliance;
+
+// ---- Store Checks Monitor (Area/Regional) ----
+let MON = null;
+async function loadMonitor(){
+  $('#monOut').innerHTML = '<div class="card muted">Loading...</div>';
+  const qs = 'manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') +
+             '&from=' + encodeURIComponent($('#monFrom').value||'') + '&to=' + encodeURIComponent($('#monTo').value||'') +
+             '&area=' + encodeURIComponent($('#monArea').value||'') + '&store=' + encodeURIComponent($('#monStore').value||'');
+  const r = await api('/api/store-checks-monitor?' + qs);
+  if (!r.ok){ $('#monOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  MON = r;
+  const curA = $('#monArea').value;
+  $('#monArea').innerHTML = '<option value="">All</option>' + r.areas.map(a=>\`<option value="\${escapeHtml(a)}" \${a===curA?'selected':''}>\${escapeHtml(a)}</option>\`).join('');
+  const curS = $('#monStore').value;
+  const validStore = r.stores.includes(curS) ? curS : '';
+  if (!validStore && curS) $('#monStore').value = '';
+  $('#monStore').innerHTML = '<option value="">All</option>' + r.stores.map(s=>\`<option value="\${escapeHtml(s)}" \${s===validStore?'selected':''}>\${escapeHtml(s)}</option>\`).join('');
+  $('#monMeta').textContent = \`\${r.auditCount} store checks\`;
+  const bg = p => p>=80?'#1f7a3a':p>=50?'#e0a020':'#c33';
+  const storeRows = r.perStore.map(x => \`<tr>
+    <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(x.name)} <span class="muted">(\${escapeHtml(x.area||'')})</span></td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.slotsDone}/\${x.dates*3} <span class="pill" style="background:\${bg(x.slotCompliance)};margin-left:4px">\${x.slotCompliance}%</span></td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center;color:#1f7a3a;font-weight:700">\${x.y}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center;color:#c33;font-weight:700">\${x.n}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.total}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:right"><span class="pill" style="background:\${bg(x.pass)}">\${x.pass}%</span></td>
+  </tr>\`).join('');
+  const itemRows = r.perItem.map(x => \`<tr>
+    <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(x.name)}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center;color:#1f7a3a;font-weight:700">\${x.y}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center;color:#c33;font-weight:700">\${x.n}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.total}</td>
+    <td style="padding:6px;border:1px solid #eee;text-align:right"><span class="pill" style="background:\${bg(x.pass)}">\${x.pass}%</span></td>
+  </tr>\`).join('');
+  $('#monOut').innerHTML =
+    \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Store Compliance</h3>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Store</th><th style="padding:6px;text-align:center">Slots Done</th><th style="padding:6px;text-align:center">Pass</th><th style="padding:6px;text-align:center">Fail</th><th style="padding:6px;text-align:center">Total</th><th style="padding:6px;text-align:right">Pass %</th></tr></thead>
+        <tbody>\${storeRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`
+    +
+    \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Items Most Failed</h3>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Item</th><th style="padding:6px;text-align:center">Pass</th><th style="padding:6px;text-align:center">Fail</th><th style="padding:6px;text-align:center">Total</th><th style="padding:6px;text-align:right">Pass %</th></tr></thead>
+        <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`;
+}
+$('#monApply').onclick = loadMonitor;
+$('#monFrom').onchange = loadMonitor;
+$('#monTo').onchange = loadMonitor;
+$('#monArea').onchange = () => { $('#monStore').value=''; loadMonitor(); };
+$('#monStore').onchange = loadMonitor;
+$('#monExport').onclick = () => {
+  if (!MON) { alert('Load monitor first'); return; }
+  const store = $('#monStore').value || 'All Stores';
+  const area  = $('#monArea').value  || 'All Areas';
+  const from  = $('#monFrom').value, to = $('#monTo').value;
+  const dateStr = (from && to) ? (from === to ? from : from + ' to ' + to) : (from || to || 'All dates');
+  const bg = p => p>=80?'#1f7a3a':p>=50?'#e0a020':'#c33';
+  const storeRows = MON.perStore.map(x => \`<tr>
+    <td style="border:1px solid #b0b0b0;padding:6px 8px"><b>\${escapeHtml(x.name)}</b> <span style="color:#789">(\${escapeHtml(x.area||'')})</span></td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center">\${x.slotsDone}/\${x.dates*3} (\${x.slotCompliance}%)</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#1f7a3a;font-weight:bold">\${x.y}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#c33;font-weight:bold">\${x.n}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center">\${x.total}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${bg(x.pass)};color:#fff;font-weight:bold">\${x.pass}%</td>
+  </tr>\`).join('');
+  const itemRows = MON.perItem.map(x => \`<tr>
+    <td style="border:1px solid #b0b0b0;padding:6px 8px">\${escapeHtml(x.name)}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#1f7a3a;font-weight:bold">\${x.y}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#c33;font-weight:bold">\${x.n}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center">\${x.total}</td>
+    <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${bg(x.pass)};color:#fff;font-weight:bold">\${x.pass}%</td>
+  </tr>\`).join('');
+  const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Store Checks</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>
+<body style="font-family:Calibri,Arial,sans-serif">
+  <h1 style="color:#1f7a3a;text-align:center;margin:0 0 12px">Fresh Compliance Result - Store Checks</h1>
+  <table style="margin-bottom:14px;font-size:13px">
+    <tr><td style="padding:2px 8px;font-weight:bold">Store:</td><td style="padding:2px 8px">\${escapeHtml(store)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Area:</td><td style="padding:2px 8px">\${escapeHtml(area)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Date:</td><td style="padding:2px 8px">\${escapeHtml(dateStr)}</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Reviewed by:</td><td style="padding:2px 8px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
+    <tr><td style="padding:2px 8px;font-weight:bold">Generated:</td><td style="padding:2px 8px">\${new Date().toLocaleString()}</td></tr>
+  </table>
+  <h2 style="color:#1f7a3a">Store Compliance</h2>
+  <table style="border-collapse:collapse;font-size:12px;margin-bottom:14px">
+    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:8px;text-align:left">Store</th><th style="border:1px solid #b0b0b0;padding:8px">Slots Done</th><th style="border:1px solid #b0b0b0;padding:8px">Pass</th><th style="border:1px solid #b0b0b0;padding:8px">Fail</th><th style="border:1px solid #b0b0b0;padding:8px">Total</th><th style="border:1px solid #b0b0b0;padding:8px">Pass %</th></tr></thead>
+    <tbody>\${storeRows}</tbody></table>
+  <h2 style="color:#1f7a3a">Items Most Failed</h2>
+  <table style="border-collapse:collapse;font-size:12px">
+    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:8px;text-align:left">Item</th><th style="border:1px solid #b0b0b0;padding:8px">Pass</th><th style="border:1px solid #b0b0b0;padding:8px">Fail</th><th style="border:1px solid #b0b0b0;padding:8px">Total</th><th style="border:1px solid #b0b0b0;padding:8px">Pass %</th></tr></thead>
+    <tbody>\${itemRows}</tbody></table>
+</body></html>\`;
+  const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Fresh_Compliance_StoreChecks_' + new Date().toISOString().slice(0,10) + '.xls';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 // Auto-login if remembered
 const remembered = localStorage.getItem('ff5_mgr');
-if (remembered) { S.manager = remembered; S.level = localStorage.getItem('ff5_lvl')||'Area Manager'; enterApp(); }
+if (remembered) {
+  S.manager = remembered;
+  S.level = localStorage.getItem('ff5_lvl') || 'Area Manager';
+  S.storeId = localStorage.getItem('ff5_sid') || null;
+  S.storeName = localStorage.getItem('ff5_sname') || null;
+  enterApp();
+}
 </script>
 </body></html>`;
 

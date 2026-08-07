@@ -397,6 +397,7 @@ app.post('/api/store-submit', async (req, res) => {
     if (!login || !store || !date || !slot || !Array.isArray(entries) || !entries.length) {
       return res.json({ ok: false, error: 'Missing fields' });
     }
+    if (!['8AM','12PM','3PM'].includes(slot)) return res.json({ ok:false, error:'Invalid slot' });
     const ts = new Date().toISOString();
     const id = auditId || 'S' + Date.now();
     // Supersede any earlier active submission for same store/date/slot (or the same auditId when editing)
@@ -470,16 +471,13 @@ app.get('/api/store-audit/:id', async (req, res) => {
 app.get('/api/store-compliance', async (req, res) => {
   try {
     const store = (req.query.store || '').trim();
-    const days = Math.min(60, parseInt(req.query.days || '14', 10) || 14);
-    const from = new Date(); from.setDate(from.getDate() - (days - 1));
-    const fromStr = from.toISOString().slice(0, 10);
     const rows = await sheetsGet('StoreChecklistData!A2:K');
     // per date -> per slot -> {y,total}
     const byDate = {};
     rows.forEach((r) => {
       if ((r[10] || 'ACTIVE') !== 'ACTIVE') return;
-      if (store && r[3] !== store) return;
-      const d = r[4]; if (!d || d < fromStr) return;
+      if (store && (r[3] || '').trim().toLowerCase() !== store.toLowerCase()) return;
+      const d = r[4]; if (!d) return;
       const slot = r[5];
       if (!byDate[d]) byDate[d] = {};
       if (!byDate[d][slot]) byDate[d][slot] = { y: 0, n: 0, total: 0 };
@@ -489,20 +487,15 @@ app.get('/api/store-compliance', async (req, res) => {
       else if (result === 'N') byDate[d][slot].n++;
       byDate[d][slot].total++;
     });
-    // Build calendar for last N days (newest first)
-    const out = [];
-    for (let i = 0; i < days; i++) {
-      const dt = new Date(); dt.setDate(dt.getDate() - i);
-      const d = dt.toISOString().slice(0, 10);
-      const slots = byDate[d] || {};
-      const built = ['8AM', '12PM', '3PM'].map((s) => {
-        const v = slots[s];
-        if (!v) return { slot: s, done: false, pass: null, y: 0, total: 0 };
+    // Return raw per-date data; frontend decides PENDING/MISSED based on local time
+    const out = Object.keys(byDate).sort().reverse().map((d) => ({
+      date: d,
+      slots: ['8AM', '12PM', '3PM'].map((s) => {
+        const v = byDate[d][s];
+        if (!v) return { slot: s, done: false };
         return { slot: s, done: true, pass: v.total ? Math.round((v.y / v.total) * 100) : 0, y: v.y, total: v.total };
-      });
-      const doneCount = built.filter((x) => x.done).length;
-      out.push({ date: d, slots: built, slotCompliance: Math.round((doneCount / 3) * 100), doneCount });
-    }
+      }),
+    }));
     res.json({ ok: true, days: out });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -785,6 +778,13 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
         </div>
       </div>
       <div class="muted" style="margin-top:6px">Current slot: <b id="scSlotLbl">-</b> - Pass rate: <span id="scScore" class="score" style="font-size:22px">0%</span> <span id="scScoreDetail"></span></div>
+      <div id="scWindowMsg" style="margin-top:8px;font-size:13px"></div>
+      <div style="margin-top:8px;padding:8px 10px;background:#eef7ff;border-left:3px solid #1f7a3a;font-size:12px;line-height:1.5;color:#345">
+        <b>Submission windows (open 1 hour before, close at deadline):</b><br>
+        &bull; 8AM: 07:00 - 09:00 (deadline 9AM)<br>
+        &bull; 12PM: 11:00 - 13:00 (deadline 1PM)<br>
+        &bull; 3PM: 14:00 - 16:00 (deadline 4PM)
+      </div>
     </div>
 
     <div id="scChecklist" class="card">Loading items...</div>
@@ -881,22 +881,52 @@ function applyRoleUI(){
   show('.tabs button[data-tab="scheck"]', isStoreMgr);
 }
 
+// Slot windows: earliest .. deadline (local time hours, 24h)
+const SLOT_WINDOWS = { '8AM': [7,9], '12PM': [11,13], '3PM': [14,16] };
+function slotOpen(slot){
+  const now = new Date();
+  const mins = now.getHours()*60 + now.getMinutes();
+  const [s,e] = SLOT_WINDOWS[slot];
+  return mins >= s*60 && mins < e*60;
+}
 function autoSlot(){
+  // Pick the slot whose window is currently open; fallback to nearest by time
+  for (const s of ['8AM','12PM','3PM']) if (slotOpen(s)) return s;
   const h = new Date().getHours();
-  if (h >= 5 && h < 11) return '8AM';
-  if (h >= 11 && h < 14) return '12PM';
+  if (h < 7) return '8AM';
+  if (h < 11) return '8AM';
+  if (h < 14) return '12PM';
   return '3PM';
 }
 function highlightSlotBtn(){
   document.querySelectorAll('#tabSCheck button[data-slot]').forEach(b => {
+    const open = slotOpen(b.dataset.slot);
     b.classList.toggle('active', b.dataset.slot === S.scSlot);
     b.style.background = b.dataset.slot === S.scSlot ? '#1f7a3a' : '';
     b.style.color = b.dataset.slot === S.scSlot ? '#fff' : '';
+    b.disabled = !open;
+    b.style.opacity = open ? '1' : '0.4';
+    b.style.cursor = open ? 'pointer' : 'not-allowed';
+    b.title = open ? '' : ('Opens ' + SLOT_WINDOWS[b.dataset.slot][0] + ':00, closes ' + SLOT_WINDOWS[b.dataset.slot][1] + ':00');
   });
+  // Update submit button + status message
+  const anyOpen = ['8AM','12PM','3PM'].some(slotOpen);
+  const canSubmit = anyOpen && slotOpen(S.scSlot);
+  const btn = $('#scSubmit');
+  if (btn){ btn.disabled = !canSubmit; btn.style.opacity = canSubmit?'1':'0.5'; btn.style.cursor = canSubmit?'pointer':'not-allowed'; }
+  const msg = $('#scWindowMsg');
+  if (msg){
+    if (!anyOpen) msg.innerHTML = '<span style="color:#c33;font-weight:600">No slot window is currently open. Windows: 8AM 07:00-09:00, 12PM 11:00-13:00, 3PM 14:00-16:00.</span>';
+    else if (!slotOpen(S.scSlot)) msg.innerHTML = '<span style="color:#c33;font-weight:600">Selected slot is not open now. Switch to the highlighted slot.</span>';
+    else msg.innerHTML = '<span style="color:#1f7a3a">Slot ' + S.scSlot + ' is open. Deadline ' + SLOT_WINDOWS[S.scSlot][1] + ':00.</span>';
+  }
 }
 document.querySelectorAll('#tabSCheck button[data-slot]').forEach(b => b.onclick = () => {
+  if (b.disabled) return;
   S.scSlot = b.dataset.slot; $('#scSlotLbl').textContent = S.scSlot; highlightSlotBtn();
 });
+// Re-evaluate slot state every 60s so the UI updates when windows open/close
+setInterval(() => { if (!$('#tabSCheck').classList.contains('hidden')) { const auto=autoSlot(); if (slotOpen(auto)) { S.scSlot=auto; $('#scSlotLbl').textContent=S.scSlot; } highlightSlotBtn(); } }, 60000);
 
 async function loadStores(){
   const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
@@ -1234,20 +1264,36 @@ function scResetForm(){
 // ---- Compliance Log ----
 async function loadCompliance(){
   $('#clOut').innerHTML = '<div class="card muted">Loading...</div>';
-  const r = await api('/api/store-compliance?store=' + encodeURIComponent(S.storeName||'') + '&days=14');
+  const r = await api('/api/store-compliance?store=' + encodeURIComponent(S.storeName||''));
   if (!r.ok){ $('#clOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
-  const rows = r.days.map(d => {
+  // Compute local "today"
+  const now = new Date();
+  const today = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+  const mins = now.getHours()*60 + now.getMinutes();
+  // Ensure today is included even if no submissions
+  const daysMap = new Map();
+  r.days.forEach(d => daysMap.set(d.date, d));
+  if (!daysMap.has(today)) daysMap.set(today, { date: today, slots: ['8AM','12PM','3PM'].map(s => ({slot:s, done:false})) });
+  const days = [...daysMap.values()].sort((a,b) => b.date.localeCompare(a.date));
+  const slotDeadline = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
+  const rows = days.map(d => {
+    let expected = 0, doneCount = 0;
     const cells = d.slots.map(s => {
-      if (!s.done) return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:8px;border:1px solid #eee">MISSED</td>\`;
-      const bg = s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee';
-      const col = s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
-      return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:8px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
+      const isToday = d.date === today;
+      const deadlinePassed = isToday ? (mins >= slotDeadline[s.slot]) : (d.date < today);
+      if (s.done) { doneCount++; expected++; const bg = s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col = s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
+        return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:8px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
+      }
+      if (deadlinePassed) { expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:8px;border:1px solid #eee">MISSED</td>\`; }
+      return \`<td style="text-align:center;background:#f2f2f2;color:#789;font-weight:600;padding:8px;border:1px solid #eee">PENDING</td>\`;
     }).join('');
-    const compBg = d.doneCount===3?'#1f7a3a':d.doneCount>=1?'#e0a020':'#c33';
+    const slotPct = expected ? Math.round((doneCount/expected)*100) : 0;
+    const compBg = expected===0 ? '#789' : (doneCount===expected ? '#1f7a3a' : doneCount>0 ? '#e0a020' : '#c33');
+    const compTxt = expected===0 ? '-' : (slotPct + '%');
     return \`<tr>
-      <td style="padding:8px;border:1px solid #eee;font-weight:600">\${d.date}</td>
+      <td style="padding:8px;border:1px solid #eee;font-weight:600">\${d.date}\${d.date===today?' <span class="muted">(today)</span>':''}</td>
       \${cells}
-      <td style="text-align:center;padding:8px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${d.slotCompliance}%</span></td>
+      <td style="text-align:center;padding:8px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td>
     </tr>\`;
   }).join('');
   $('#clOut').innerHTML = \`<div class="card"><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">

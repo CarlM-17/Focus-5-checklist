@@ -585,12 +585,38 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       name, y: v.y, n: v.n, total: v.total, pass: v.total ? Math.round((v.y / v.total) * 100) : 0,
     })).sort((a, b) => a.pass - b.pass);
 
+    // Per-store per-day slot breakdown for consolidated Compliance Log
+    const byStoreDate = {}; // "store||date" -> { store, date, slots:{8AM:{y,total},...} }
+    rows.forEach((r) => {
+      const store = r[3] || '(unknown)';
+      const d = r[4] || '', slot = r[5] || '';
+      if (!d || !slot) return;
+      const k = store + '||' + d;
+      if (!byStoreDate[k]) byStoreDate[k] = { store, date: d, slots: {} };
+      const bucket = byStoreDate[k].slots[slot] = byStoreDate[k].slots[slot] || { y: 0, n: 0, total: 0 };
+      if (r[6] === 'AUDIT NOTES') return;
+      const result = String(r[8] || '').toUpperCase();
+      if (result === 'Y') bucket.y++;
+      else if (result === 'N') bucket.n++;
+      bucket.total++;
+    });
+    const perDay = Object.values(byStoreDate).map((d) => ({
+      store: d.store,
+      date: d.date,
+      slots: ['8AM', '12PM', '3PM'].map((s) => {
+        const v = d.slots[s];
+        if (!v) return { slot: s, done: false };
+        return { slot: s, done: true, pass: v.total ? Math.round((v.y / v.total) * 100) : 0, y: v.y, total: v.total };
+      }),
+    })).sort((a, b) => b.date.localeCompare(a.date) || a.store.localeCompare(b.store));
+
     res.json({
       ok: true,
       areas: allowedAreas.sort(),
       stores: [...new Set(allowedStores)].sort(),
       perStore: perStoreArr,
       perItem: perItemArr,
+      perDay: perDay,
       auditCount: new Set(rows.map((r) => r[1])).size,
     });
   } catch (e) {
@@ -1343,10 +1369,34 @@ async function loadMonitor(){
   let detailHtml = '';
   const selStore = $('#monStore').value;
   if (selStore) {
-    detailHtml = \`<div id="monCompLog" class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log - \${escapeHtml(selStore)}</h3><div class="muted">Loading...</div></div>\`
-              + \`<div id="monRecent" class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - \${escapeHtml(selStore)}</h3><div class="muted">Loading...</div></div>\`;
+    detailHtml = \`<div id="monRecent" class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - \${escapeHtml(selStore)}</h3><div class="muted">Loading...</div></div>\`;
   }
-  $('#monOut').innerHTML =
+  // Consolidated Compliance Log (all stores in scope, per day)
+  const nowM = new Date();
+  const todayM = nowM.getFullYear()+'-'+String(nowM.getMonth()+1).padStart(2,'0')+'-'+String(nowM.getDate()).padStart(2,'0');
+  const minsM = nowM.getHours()*60 + nowM.getMinutes();
+  const slotDeadlineM = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
+  const perDayRows = (r.perDay||[]).map(d => {
+    let expected=0, doneCount=0;
+    const cells = d.slots.map(s => {
+      const isToday = d.date === todayM;
+      const deadlinePassed = isToday ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
+      if (s.done){ doneCount++; expected++; const cbg=s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col=s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
+        return \`<td style="text-align:center;background:\${cbg};color:\${col};font-weight:700;padding:6px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
+      }
+      if (deadlinePassed){ expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:6px;border:1px solid #eee">MISSED</td>\`; }
+      return \`<td style="text-align:center;background:#f2f2f2;color:#789;font-weight:600;padding:6px;border:1px solid #eee">PENDING</td>\`;
+    }).join('');
+    const pct = expected ? Math.round((doneCount/expected)*100) : 0;
+    const compBg = expected===0 ? '#789' : (doneCount===expected ? '#1f7a3a' : doneCount>0 ? '#e0a020' : '#c33');
+    const compTxt = expected===0 ? '-' : (pct + '%');
+    return \`<tr><td style="padding:6px;border:1px solid #eee;font-weight:600">\${escapeHtml(d.store)}</td><td style="padding:6px;border:1px solid #eee">\${d.date}\${d.date===todayM?' <span class="muted">(today)</span>':''}</td>\${cells}<td style="text-align:center;padding:6px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td></tr>\`;
+  }).join('');
+  const compLogCard = \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>
+      <tbody>\${perDayRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No submissions in this range</td></tr>'}</tbody></table></div></div>\`;
+  $('#monOut').innerHTML = compLogCard +
     \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Store Compliance</h3>
       <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:140px">Slots Done</th><th style="padding:6px;text-align:center;width:60px">Pass</th><th style="padding:6px;text-align:center;width:60px">Fail</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Pass %</th></tr></thead>
@@ -1357,7 +1407,7 @@ async function loadMonitor(){
         <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Item</th><th style="padding:6px;text-align:center;width:60px">Pass</th><th style="padding:6px;text-align:center;width:60px">Fail</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Pass %</th></tr></thead>
         <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`
     + detailHtml;
-  if (selStore) { loadMonComplog(selStore); loadMonRecent(selStore); }
+  if (selStore) { loadMonRecent(selStore); }
 }
 
 async function loadMonComplog(store){

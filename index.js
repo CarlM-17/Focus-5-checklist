@@ -212,7 +212,7 @@ app.post('/api/submit', async (req, res) => {
       e.remarks || '',
       'ACTIVE',
     ]);
-    await sheetsAppend('ChecklistData!A:J', rows);
+    await sheetsAppend('ChecklistData!A1:J1', rows);
     res.json({ ok: true, auditId: id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -412,7 +412,7 @@ app.post('/api/store-submit', async (req, res) => {
     if (generalNotes && generalNotes.trim()) {
       rows.push([ts, id, login, store, date, slot, 'AUDIT NOTES', 'General Notes', '', generalNotes.trim(), 'ACTIVE']);
     }
-    await sheetsAppend('StoreChecklistData!A:K', rows);
+    await sheetsAppend('StoreChecklistData!A1:K1', rows);
     res.json({ ok: true, auditId: id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -1335,6 +1335,13 @@ async function loadMonitor(){
     <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.total}</td>
     <td style="padding:6px;border:1px solid #eee;text-align:right"><span class="pill" style="background:\${bg(x.pass)}">\${x.pass}%</span></td>
   </tr>\`).join('');
+  // Per-store detail sections (only when a store is filtered)
+  let detailHtml = '';
+  const selStore = $('#monStore').value;
+  if (selStore) {
+    detailHtml = \`<div id="monCompLog" class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log - \${escapeHtml(selStore)}</h3><div class="muted">Loading...</div></div>\`
+              + \`<div id="monRecent" class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - \${escapeHtml(selStore)}</h3><div class="muted">Loading...</div></div>\`;
+  }
   $('#monOut').innerHTML =
     \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Store Compliance</h3>
       <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -1344,7 +1351,92 @@ async function loadMonitor(){
     \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Items Most Failed</h3>
       <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Item</th><th style="padding:6px;text-align:center;width:60px">Pass</th><th style="padding:6px;text-align:center;width:60px">Fail</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Pass %</th></tr></thead>
-        <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`;
+        <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`
+    + detailHtml;
+  if (selStore) { loadMonComplog(selStore); loadMonRecent(selStore); }
+}
+
+async function loadMonComplog(store){
+  const r = await api('/api/store-compliance?store=' + encodeURIComponent(store));
+  const box = $('#monCompLog'); if (!box) return;
+  if (!r.ok){ box.innerHTML = '<h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log - '+escapeHtml(store)+'</h3><div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  const now = new Date();
+  const today = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+  const mins = now.getHours()*60 + now.getMinutes();
+  const daysMap = new Map();
+  r.days.forEach(d => daysMap.set(d.date, d));
+  if (!daysMap.has(today)) daysMap.set(today, { date: today, slots: ['8AM','12PM','3PM'].map(s => ({slot:s, done:false})) });
+  const days = [...daysMap.values()].sort((a,b) => b.date.localeCompare(a.date));
+  const slotDeadline = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
+  const rows = days.map(d => {
+    let expected=0, doneCount=0;
+    const cells = d.slots.map(s => {
+      const isToday = d.date === today;
+      const deadlinePassed = isToday ? (mins >= slotDeadline[s.slot]) : (d.date < today);
+      if (s.done){ doneCount++; expected++; const bg=s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col=s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
+        return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:6px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
+      }
+      if (deadlinePassed){ expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:6px;border:1px solid #eee">MISSED</td>\`; }
+      return \`<td style="text-align:center;background:#f2f2f2;color:#789;font-weight:600;padding:6px;border:1px solid #eee">PENDING</td>\`;
+    }).join('');
+    const pct = expected ? Math.round((doneCount/expected)*100) : 0;
+    const compBg = expected===0 ? '#789' : (doneCount===expected ? '#1f7a3a' : doneCount>0 ? '#e0a020' : '#c33');
+    const compTxt = expected===0 ? '-' : (pct + '%');
+    return \`<tr><td style="padding:6px;border:1px solid #eee;font-weight:600">\${d.date}\${d.date===today?' <span class="muted">(today)</span>':''}</td>\${cells}<td style="text-align:center;padding:6px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td></tr>\`;
+  }).join('');
+  box.innerHTML = '<h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log - '+escapeHtml(store)+'</h3>'
+    + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
+    + '<thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>'
+    + '<tbody>' + (rows || '<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No submissions</td></tr>') + '</tbody></table></div>';
+}
+
+async function loadMonRecent(store){
+  const from = $('#monFrom').value || '';
+  const to = $('#monTo').value || '';
+  const qs = 'store=' + encodeURIComponent(store) + (from?'&from='+encodeURIComponent(from):'') + (to?'&to='+encodeURIComponent(to):'');
+  const r = await api('/api/store-history?' + qs);
+  const box = $('#monRecent'); if (!box) return;
+  if (!r.ok){ box.innerHTML = '<h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - '+escapeHtml(store)+'</h3><div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  if (!r.audits.length){ box.innerHTML = '<h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - '+escapeHtml(store)+'</h3><div class="muted">No submissions in this range.</div>'; return; }
+  const bg = p => p>=80?'#1f7a3a':p>=50?'#e0a020':'#c33';
+  const items = r.audits.map(a => \`<div class="hist" style="align-items:flex-start">
+    <div style="flex:1">
+      <div><b>\${escapeHtml(a.date)}</b> - <span class="pill" style="background:#334;font-size:11px">\${escapeHtml(a.slot||'')}</span> <span class="muted">by \${escapeHtml(a.login||'')}</span></div>
+      <div class="meta">\${new Date(a.timestamp).toLocaleString()} - Pass \${a.y}/\${a.total}, Fail \${a.n}</div>
+      <div id="det_\${a.auditId}" style="margin-top:8px;display:none"></div>
+    </div>
+    <div style="text-align:right">
+      <span class="pill" style="background:\${bg(a.pass)}">\${a.pass}%</span>
+      <div style="margin-top:6px"><button class="sm ghost" onclick="toggleStoreAudit('\${a.auditId}')">View</button></div>
+    </div>
+  </div>\`).join('');
+  box.innerHTML = '<h3 style="margin:0 0 8px;color:#1f7a3a">Recent Submissions - '+escapeHtml(store)+'</h3>' + items;
+}
+
+async function toggleStoreAudit(id){
+  const el = document.getElementById('det_' + id);
+  if (!el) return;
+  if (el.style.display !== 'none' && el.innerHTML.trim()) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  if (!el.innerHTML.trim()) el.innerHTML = '<div class="muted">Loading...</div>';
+  const r = await api('/api/store-audit/' + encodeURIComponent(id));
+  if (!r.ok){ el.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  const groups = {};
+  r.items.forEach(it => { if (it.category==='AUDIT NOTES') return; (groups[it.category]=groups[it.category]||[]).push(it); });
+  const noteRow = r.items.find(it => it.category==='AUDIT NOTES');
+  let html = Object.keys(groups).map(cat => {
+    const rows = groups[cat].map(it => {
+      const isY = String(it.result||'').toUpperCase()==='Y';
+      const isN = String(it.result||'').toUpperCase()==='N';
+      const badge = isY ? '<span style="color:#1f7a3a;font-weight:700">&#10004; Pass</span>'
+                        : isN ? '<span style="color:#c33;font-weight:700">&#10008; Fail</span>'
+                              : '<span class="muted">-</span>';
+      return \`<tr><td style="padding:4px 6px;border-bottom:1px solid #eee">\${escapeHtml(it.item)}</td><td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:center;width:80px">\${badge}</td><td style="padding:4px 6px;border-bottom:1px solid #eee;color:#456;font-size:12px">\${escapeHtml(it.remarks||'')}</td></tr>\`;
+    }).join('');
+    return \`<div style="margin-top:8px"><div style="font-weight:700;color:#1f7a3a;font-size:13px">\${escapeHtml(cat)}</div><table style="width:100%;border-collapse:collapse;font-size:13px">\${rows}</table></div>\`;
+  }).join('');
+  if (noteRow && noteRow.remarks) html += \`<div style="margin-top:8px;padding:8px;background:#eef7ff;border-left:3px solid #1f7a3a;font-size:13px"><b>General Notes:</b><br>\${escapeHtml(noteRow.remarks)}</div>\`;
+  el.innerHTML = html || '<div class="muted">No items.</div>';
 }
 $('#monApply').onclick = loadMonitor;
 $('#monFrom').onchange = loadMonitor;

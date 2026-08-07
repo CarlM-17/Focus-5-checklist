@@ -1050,7 +1050,7 @@ async function loadSummary(){
   </tr>\`).join('');
   const tbl = (title, rows) => \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">\${title}</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
-    <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Name</th><th style="padding:6px">0</th><th style="padding:6px">1</th><th style="padding:6px">2</th><th style="padding:6px">Total</th><th style="padding:6px;text-align:right">Score</th></tr></thead>
+    <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Name</th><th style="padding:6px;text-align:center;width:50px">0</th><th style="padding:6px;text-align:center;width:50px">1</th><th style="padding:6px;text-align:center;width:50px">2</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Score</th></tr></thead>
     <tbody>\${rowHtml(rows)}</tbody></table></div></div>\`;
   $('#sumOut').innerHTML =
     (r.perArea.length ? tbl('Summary by Area', r.perArea) : '') +
@@ -1292,12 +1292,12 @@ async function loadMonitor(){
   $('#monOut').innerHTML =
     \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Store Compliance</h3>
       <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Store</th><th style="padding:6px;text-align:center">Slots Done</th><th style="padding:6px;text-align:center">Pass</th><th style="padding:6px;text-align:center">Fail</th><th style="padding:6px;text-align:center">Total</th><th style="padding:6px;text-align:right">Pass %</th></tr></thead>
+        <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:140px">Slots Done</th><th style="padding:6px;text-align:center;width:60px">Pass</th><th style="padding:6px;text-align:center;width:60px">Fail</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Pass %</th></tr></thead>
         <tbody>\${storeRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`
     +
     \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Items Most Failed</h3>
       <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="background:#eef;text-align:left"><th style="padding:6px">Item</th><th style="padding:6px;text-align:center">Pass</th><th style="padding:6px;text-align:center">Fail</th><th style="padding:6px;text-align:center">Total</th><th style="padding:6px;text-align:right">Pass %</th></tr></thead>
+        <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Item</th><th style="padding:6px;text-align:center;width:60px">Pass</th><th style="padding:6px;text-align:center;width:60px">Fail</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:80px">Pass %</th></tr></thead>
         <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`;
 }
 $('#monApply').onclick = loadMonitor;

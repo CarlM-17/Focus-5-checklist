@@ -1326,17 +1326,20 @@ async function loadCompliance(){
   r.days.forEach(d => daysMap.set(d.date, d));
   if (!daysMap.has(today)) daysMap.set(today, { date: today, slots: ['8AM','12PM','3PM'].map(s => ({slot:s, done:false})) });
   const days = [...daysMap.values()].sort((a,b) => b.date.localeCompare(a.date));
+  const slotStart = { '8AM':7*60, '12PM':11*60, '3PM':14*60 };
   const slotDeadline = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
   const rows = days.map(d => {
     let expected = 0, doneCount = 0;
     const cells = d.slots.map(s => {
       const isToday = d.date === today;
       const deadlinePassed = isToday ? (mins >= slotDeadline[s.slot]) : (d.date < today);
+      const windowOpen  = isToday && mins >= slotStart[s.slot] && mins < slotDeadline[s.slot];
       if (s.done) { doneCount++; expected++; const bg = s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col = s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
         return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:8px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
       }
       if (deadlinePassed) { expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:8px;border:1px solid #eee">MISSED</td>\`; }
-      return \`<td style="text-align:center;background:#f2f2f2;color:#789;font-weight:600;padding:8px;border:1px solid #eee">PENDING</td>\`;
+      if (windowOpen) { return \`<td style="text-align:center;background:#fff5e0;color:#b8860b;font-weight:700;padding:8px;border:1px solid #eee">OPEN</td>\`; }
+      return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:8px;border:1px solid #eee">&mdash;</td>\`;
     }).join('');
     const slotPct = expected ? Math.round((doneCount/expected)*100) : 0;
     const compBg = expected===0 ? '#789' : (doneCount===expected ? '#1f7a3a' : doneCount>0 ? '#e0a020' : '#c33');
@@ -1396,17 +1399,20 @@ async function loadMonitor(){
   const nowM = new Date();
   const todayM = nowM.getFullYear()+'-'+String(nowM.getMonth()+1).padStart(2,'0')+'-'+String(nowM.getDate()).padStart(2,'0');
   const minsM = nowM.getHours()*60 + nowM.getMinutes();
+  const slotStartM    = { '8AM':7*60, '12PM':11*60, '3PM':14*60 };
   const slotDeadlineM = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
   const perDayRows = (r.perDay||[]).map(d => {
     let expected=0, doneCount=0;
     const cells = d.slots.map(s => {
       const isToday = d.date === todayM;
       const deadlinePassed = isToday ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
+      const windowOpen     = isToday && minsM >= slotStartM[s.slot] && minsM < slotDeadlineM[s.slot];
       if (s.done){ doneCount++; expected++; const cbg=s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col=s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
         return \`<td style="text-align:center;background:\${cbg};color:\${col};font-weight:700;padding:6px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
       }
       if (deadlinePassed){ expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:6px;border:1px solid #eee">MISSED</td>\`; }
-      return \`<td style="text-align:center;background:#f2f2f2;color:#789;font-weight:600;padding:6px;border:1px solid #eee">PENDING</td>\`;
+      if (windowOpen){ return \`<td style="text-align:center;background:#fff5e0;color:#b8860b;font-weight:700;padding:6px;border:1px solid #eee">OPEN</td>\`; }
+      return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:6px;border:1px solid #eee">&mdash;</td>\`;
     }).join('');
     const pct = expected ? Math.round((doneCount/expected)*100) : 0;
     const compBg = expected===0 ? '#789' : (doneCount===expected ? '#1f7a3a' : doneCount>0 ? '#e0a020' : '#c33');

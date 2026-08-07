@@ -241,7 +241,7 @@ app.get('/api/history', async (req, res) => {
     const map = new Map();
     rows.forEach((r) => {
       if ((r[9] || 'ACTIVE') !== 'ACTIVE') return;
-      if (storeFilter && r[3] !== storeFilter) return;
+      if (storeFilter && (r[3] || '').trim().toLowerCase() !== storeFilter.toLowerCase()) return;
       if (!isRegional && !isStoreMgr && manager && (r[2] || '').trim().toLowerCase() !== manager) return;
       const id = r[1];
       if (!id) return;
@@ -326,7 +326,7 @@ app.get('/api/summary', async (req, res) => {
       const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
       if (!isRegional && !managerAreas.has(areaOfRow)) return false;
       if (areaFilter && areaOfRow !== areaFilter) return false;
-      if (storeFilter && (r[3] || '') !== storeFilter) return false;
+      if (storeFilter && (r[3] || '').trim().toLowerCase() !== storeFilter.toLowerCase()) return false;
       return true;
     });
 
@@ -684,11 +684,10 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 <div id="appScreen" class="hidden">
   <div class="tabs">
     <button data-tab="new" class="active">New Audit</button>
-    <button data-tab="hist">History</button>
-    <button data-tab="sum">Summary</button>
+    <button data-tab="hist">AM Check History</button>
+    <button data-tab="sum">AM Check Summary</button>
     <button data-tab="mon">Store Checks</button>
     <button data-tab="scheck">Store Check</button>
-    <button data-tab="clog">Compliance Log</button>
   </div>
 
   <div id="tabNew">
@@ -763,6 +762,13 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
   </div>
 
   <div id="tabSCheck" class="hidden">
+    <div class="tabs" style="top:56px">
+      <button data-subtab="new" class="active">New Check</button>
+      <button data-subtab="hist">Store Check History</button>
+      <button data-subtab="clog">Compliance Log</button>
+    </div>
+
+    <div id="scSubNew">
     <div class="card">
       <div style="font-weight:600;color:#1f7a3a">Store: <span id="scStoreLbl"></span></div>
       <div style="margin-top:8px" class="row">
@@ -791,15 +797,23 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
       <button id="scReset" class="ghost" style="margin-left:8px">Reset</button>
       <div id="scErr" class="err"></div>
     </div>
-  </div>
-
-  <div id="tabCLog" class="hidden">
-    <div class="card">
-      <div style="font-weight:600;color:#1f7a3a">Store: <span id="clStoreLbl"></span></div>
-      <div class="muted" style="margin-top:4px">Last 14 days - 3 slots per day (8AM, 12PM, 3PM)</div>
-      <button id="clReload" class="ghost sm" style="margin-top:8px">Refresh</button>
     </div>
-    <div id="clOut"></div>
+
+    <div id="scSubHist" class="hidden">
+      <div class="card">
+        <button id="schReload" class="ghost sm">Refresh</button>
+        <div id="schList" style="margin-top:10px">Loading...</div>
+      </div>
+    </div>
+
+    <div id="scSubClog" class="hidden">
+      <div class="card">
+        <div style="font-weight:600;color:#1f7a3a">Store: <span id="clStoreLbl"></span></div>
+        <div class="muted" style="margin-top:4px">Last 14 days - 3 slots per day (8AM, 12PM, 3PM)</div>
+        <button id="clReload" class="ghost sm" style="margin-top:8px">Refresh</button>
+      </div>
+      <div id="clOut"></div>
+    </div>
   </div>
 </div>
 
@@ -863,7 +877,6 @@ function applyRoleUI(){
   show('.tabs button[data-tab="sum"]',  true);
   show('.tabs button[data-tab="mon"]',  !isStoreMgr);
   show('.tabs button[data-tab="scheck"]', isStoreMgr);
-  show('.tabs button[data-tab="clog"]',   isStoreMgr);
 }
 
 function autoSlot(){
@@ -973,12 +986,38 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabSum').classList.toggle('hidden', t!=='sum');
   $('#tabMon').classList.toggle('hidden', t!=='mon');
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
-  $('#tabCLog').classList.toggle('hidden', t!=='clog');
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-30); $('#sumFrom').value=d.toISOString().slice(0,10); $('#sumTo').value=to; } loadSummary(); }
   if (t==='mon') { if(!$('#monFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-14); $('#monFrom').value=d.toISOString().slice(0,10); $('#monTo').value=to; } loadMonitor(); }
-  if (t==='clog') loadCompliance();
 });
+
+// Sub-tabs within Store Check
+document.querySelectorAll('#tabSCheck .tabs button[data-subtab]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabSCheck .tabs button[data-subtab]').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  const st = b.dataset.subtab;
+  $('#scSubNew').classList.toggle('hidden', st!=='new');
+  $('#scSubHist').classList.toggle('hidden', st!=='hist');
+  $('#scSubClog').classList.toggle('hidden', st!=='clog');
+  if (st==='hist') loadStoreCheckHistory();
+  if (st==='clog') loadCompliance();
+});
+
+async function loadStoreCheckHistory(){
+  $('#schList').textContent = 'Loading...';
+  const r = await api('/api/store-history?store=' + encodeURIComponent(S.storeName||''));
+  if (!r.ok){ $('#schList').innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  if (!r.audits.length){ $('#schList').textContent = 'No store checks yet.'; return; }
+  const bg = p => p>=80?'#1f7a3a':p>=50?'#e0a020':'#c33';
+  $('#schList').innerHTML = r.audits.map(a => \`<div class="hist">
+    <div>
+      <div><b>\${escapeHtml(a.date)}</b> - <span class="pill" style="background:#334;font-size:11px">\${escapeHtml(a.slot||'')}</span></div>
+      <div class="meta">\${new Date(a.timestamp).toLocaleString()} - Pass \${a.y}/\${a.total}, Fail \${a.n}</div>
+    </div>
+    <div><span class="pill" style="background:\${bg(a.pass)}">\${a.pass}%</span></div>
+  </div>\`).join('');
+}
+$('#schReload') && ($('#schReload').onclick = loadStoreCheckHistory);
 
 // ---- Summary ----
 let SUM = null;

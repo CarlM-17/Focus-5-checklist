@@ -1430,7 +1430,45 @@ async function loadMonitor(){
     const compTxt = expected===0 ? '-' : (pct + '%');
     return \`<tr><td style="padding:6px;border:1px solid #eee;font-weight:600">\${escapeHtml(d.store)}</td><td style="padding:6px;border:1px solid #eee">\${d.date}\${d.date===todayM?' <span class="muted">(today)</span>':''}</td>\${cells}<td style="text-align:center;padding:6px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td></tr>\`;
   }).join('');
-  const compLogCard = \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
+  // ---- Dynamic "Stores Without Checklist Submitted" alert card ----
+  // Determine most recently ENDED slot today (deadline passed)
+  let recentSlot = null;
+  if (minsM >= 16*60) recentSlot = '3PM';
+  else if (minsM >= 13*60) recentSlot = '12PM';
+  else if (minsM >= 9*60) recentSlot = '8AM';
+  let missCard = '';
+  if (recentSlot) {
+    const missed = (r.perDay || []).filter(d => d.date === todayM).map(d => {
+      const s = d.slots.find(x => x.slot === recentSlot);
+      return { store: d.store, missed: !s || !s.done };
+    }).filter(x => x.missed);
+    const count = missed.length;
+    const total = (r.perDay || []).filter(d => d.date === todayM).length;
+    if (count === 0) {
+      missCard = \`<div class="card" style="border-left:6px solid #1f7a3a;background:#f0faf3">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:26px">&#9989;</div>
+          <div style="flex:1">
+            <div style="color:#1f7a3a;font-weight:700;font-size:16px">All stores submitted the \${recentSlot} checklist</div>
+            <div class="muted" style="margin-top:2px">\${total}/\${total} stores compliant for \${recentSlot} on \${todayM}</div>
+          </div>
+        </div></div>\`;
+    } else {
+      const chips = missed.map(m => \`<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:6px 10px;border-radius:20px;margin:3px 4px 3px 0;font-weight:600;font-size:13px">&#9888; \${escapeHtml(m.store)}</span>\`).join('');
+      missCard = \`<div class="card" style="border-left:6px solid #c33;background:linear-gradient(135deg,#fff5f5 0%,#ffe8e8 100%);box-shadow:0 2px 8px rgba(200,50,50,.15)">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+          <div style="font-size:32px;line-height:1">&#128680;</div>
+          <div style="flex:1">
+            <div style="color:#c33;font-weight:800;font-size:17px;letter-spacing:.3px">STORES WITHOUT CHECKLIST SUBMITTED at \${recentSlot} time slot</div>
+            <div style="color:#a00;font-size:13px;margin-top:3px"><b>\${count}</b> of \${total} store\${total===1?'':'s'} missed the \${recentSlot} deadline for \${todayM}</div>
+          </div>
+          <div style="text-align:center;padding:8px 14px;background:#c33;color:#fff;border-radius:8px;font-weight:800;font-size:20px;min-width:60px">\${count}</div>
+        </div>
+        <div style="padding-top:8px;border-top:1px dashed #f0b0b0">\${chips}</div>
+      </div>\`;
+    }
+  }
+  const compLogCard = missCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>
       <tbody>\${perDayRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No submissions in this range</td></tr>'}</tbody></table></div></div>\`;

@@ -1041,12 +1041,16 @@ async function loadStoreCheckHistory(){
   if (!r.ok){ $('#schList').innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
   if (!r.audits.length){ $('#schList').textContent = 'No store checks yet.'; return; }
   const bg = p => p>=80?'#1f7a3a':p>=50?'#e0a020':'#c33';
-  $('#schList').innerHTML = r.audits.map(a => \`<div class="hist">
-    <div>
+  $('#schList').innerHTML = r.audits.map(a => \`<div class="hist" style="align-items:flex-start">
+    <div style="flex:1">
       <div><b>\${escapeHtml(a.date)}</b> - <span class="pill" style="background:#334;font-size:11px">\${escapeHtml(a.slot||'')}</span></div>
       <div class="meta">\${new Date(a.timestamp).toLocaleString()} - Pass \${a.y}/\${a.total}, Fail \${a.n}</div>
+      <div id="det_\${a.auditId}" style="margin-top:8px;display:none"></div>
     </div>
-    <div><span class="pill" style="background:\${bg(a.pass)}">\${a.pass}%</span></div>
+    <div style="text-align:right">
+      <span class="pill" style="background:\${bg(a.pass)}">\${a.pass}%</span>
+      <div style="margin-top:6px"><button class="sm ghost" onclick="toggleStoreAudit('\${a.auditId}')">View</button></div>
+    </div>
   </div>\`).join('');
 }
 $('#schReload') && ($('#schReload').onclick = loadStoreCheckHistory);

@@ -376,6 +376,14 @@ app.get('/api/summary', async (req, res) => {
 });
 
 // ---------- Store Manager (Y/N 3x-daily) ----------
+// Google Sheets may auto-format "8AM"/"12PM"/"3PM" as time cells ("8:00 AM"). Normalize on read.
+function normalizeSlot(raw) {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === '8AM'  || /^0?8:00(:00)?\s*(AM)?$/.test(s)) return '8AM';
+  if (s === '12PM' || /^12:00(:00)?\s*(PM)?$/.test(s)) return '12PM';
+  if (s === '3PM'  || /^0?3:00(:00)?\s*PM$|^15:00(:00)?$/.test(s)) return '3PM';
+  return s;
+}
 async function markStoreEdited(auditId, store, date, slot) {
   const rows = await sheetsGet('StoreChecklistData!A2:K');
   const data = [];
@@ -385,7 +393,7 @@ async function markStoreEdited(auditId, store, date, slot) {
     // Match by auditId OR by same store+date+slot (replace prior slot submission)
     const match = auditId
       ? r[1] === auditId
-      : (r[3] === store && r[4] === date && r[5] === slot);
+      : ((r[3] || '').trim() === store && r[4] === date && normalizeSlot(r[5]) === slot);
     if (match) data.push({ range: `StoreChecklistData!K${i + 2}`, values: [['EDITED']] });
   });
   if (data.length) await sheetsBatchUpdateValues(data);
@@ -434,7 +442,7 @@ app.get('/api/store-history', async (req, res) => {
       const id = r[1];
       if (!id) return;
       if (!map.has(id)) {
-        map.set(id, { auditId: id, timestamp: r[0], login: r[2], store: r[3], date: r[4], slot: r[5], y: 0, n: 0, total: 0 });
+        map.set(id, { auditId: id, timestamp: r[0], login: r[2], store: r[3], date: r[4], slot: normalizeSlot(r[5]), y: 0, n: 0, total: 0 });
       }
       const a = map.get(id);
       if (r[6] === 'AUDIT NOTES') return;
@@ -460,7 +468,7 @@ app.get('/api/store-audit/:id', async (req, res) => {
     const rows = await sheetsGet('StoreChecklistData!A2:K');
     const entries = rows.filter((r) => r[1] === id && (r[10] || 'ACTIVE') === 'ACTIVE');
     if (!entries.length) return res.json({ ok: false, error: 'Not found' });
-    const meta = { auditId: id, login: entries[0][2], store: entries[0][3], date: entries[0][4], slot: entries[0][5] };
+    const meta = { auditId: id, login: entries[0][2], store: entries[0][3], date: entries[0][4], slot: normalizeSlot(entries[0][5]) };
     const items = entries.map((r) => ({ category: r[6], item: r[7], result: r[8], remarks: r[9] }));
     res.json({ ok: true, meta, items });
   } catch (e) {
@@ -478,7 +486,7 @@ app.get('/api/store-compliance', async (req, res) => {
       if ((r[10] || 'ACTIVE') !== 'ACTIVE') return;
       if (store && (r[3] || '').trim().toLowerCase() !== store.toLowerCase()) return;
       const d = r[4]; if (!d) return;
-      const slot = r[5];
+      const slot = normalizeSlot(r[5]);
       if (!byDate[d]) byDate[d] = {};
       if (!byDate[d][slot]) byDate[d][slot] = { y: 0, n: 0, total: 0 };
       if (r[6] === 'AUDIT NOTES') return;
@@ -554,7 +562,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     rows.forEach((r) => {
       const store = (r[3] || '(unknown)').trim();
       const areaOfRow = (storeMap[store] || {}).area || '(unknown)';
-      const d = r[4] || '', slot = r[5] || '';
+      const d = r[4] || '', slot = normalizeSlot(r[5]);
       slotSet[store] = slotSet[store] || new Set();
       dateSet[store] = dateSet[store] || new Set();
       if (d) dateSet[store].add(d);
@@ -597,7 +605,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     const byStoreDate = {}; // "store||date" -> { store, date, slots:{8AM:{y,total},...} }
     rows.forEach((r) => {
       const store = (r[3] || '(unknown)').trim();
-      const d = r[4] || '', slot = r[5] || '';
+      const d = r[4] || '', slot = normalizeSlot(r[5]);
       if (!d || !slot) return;
       const k = store + '||' + d;
       if (!byStoreDate[k]) byStoreDate[k] = { store, date: d, slots: {} };

@@ -585,7 +585,23 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       name, y: v.y, n: v.n, total: v.total, pass: v.total ? Math.round((v.y / v.total) * 100) : 0,
     })).sort((a, b) => a.pass - b.pass);
 
+    // Authorized store-manager stores (in scope) — used to ensure every store appears in today's log
+    const smRows = await sheetsGet('StoreManagers!A2:C');
+    const smStoreIds = new Set(smRows.map((r) => String(r[0] || '').trim()).filter(Boolean));
+    const authorizedStores = stores
+      .filter((r) => {
+        const storeName = r[4], storeId = String(r[3] || '').trim(), areaName = r[2] || '(no area)';
+        if (!storeName || !storeId) return false;
+        if (!smStoreIds.has(storeId)) return false;
+        if (!isRegional && !managerAreas.has(areaName)) return false;
+        if (areaFilter && areaName !== areaFilter) return false;
+        if (storeFilter && storeName !== storeFilter) return false;
+        return true;
+      })
+      .map((r) => r[4]);
+
     // Per-store per-day slot breakdown for consolidated Compliance Log
+    const todayLocal = (() => { const d = new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); })();
     const byStoreDate = {}; // "store||date" -> { store, date, slots:{8AM:{y,total},...} }
     rows.forEach((r) => {
       const store = r[3] || '(unknown)';
@@ -599,6 +615,11 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       if (result === 'Y') bucket.y++;
       else if (result === 'N') bucket.n++;
       bucket.total++;
+    });
+    // Ensure every authorized store has a today row so all 20 stores appear even without submissions
+    authorizedStores.forEach((s) => {
+      const k = s + '||' + todayLocal;
+      if (!byStoreDate[k]) byStoreDate[k] = { store: s, date: todayLocal, slots: {} };
     });
     const perDay = Object.values(byStoreDate).map((d) => ({
       store: d.store,

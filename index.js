@@ -304,6 +304,7 @@ app.get('/api/summary', async (req, res) => {
     const areaFilter = (req.query.area || '').trim();
     const storeFilter = (req.query.store || '').trim();
     const isRegional = level === 'regional manager';
+    const isStoreMgr = level === 'store manager';
 
     const stores = await sheetsGet('ListOfStores!A2:G');
     const storeMap = {};
@@ -324,7 +325,7 @@ app.get('/api/summary', async (req, res) => {
       if (from && (r[4] || '') < from) return false;
       if (to && (r[4] || '') > to) return false;
       const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
-      if (!isRegional && !managerAreas.has(areaOfRow)) return false;
+      if (!isRegional && !isStoreMgr && !managerAreas.has(areaOfRow)) return false;
       if (areaFilter && areaOfRow !== areaFilter) return false;
       if (storeFilter && (r[3] || '').trim().toLowerCase() !== storeFilter.toLowerCase()) return false;
       return true;
@@ -517,6 +518,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     const areaFilter = (req.query.area || '').trim();
     const storeFilter = (req.query.store || '').trim();
     const isRegional = level === 'regional manager';
+    const isStoreMgr = level === 'store manager';
 
     const stores = await sheetsGet('ListOfStores!A2:G');
     const storeMap = {};
@@ -545,7 +547,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       if (from && (r[4] || '') < from) return false;
       if (to && (r[4] || '') > to) return false;
       const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
-      if (!isRegional && !managerAreas.has(areaOfRow)) return false;
+      if (!isRegional && !isStoreMgr && !managerAreas.has(areaOfRow)) return false;
       if (areaFilter && areaOfRow !== areaFilter) return false;
       if (storeFilter && r[3] !== storeFilter) return false;
       return true;

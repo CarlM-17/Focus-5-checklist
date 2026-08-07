@@ -552,7 +552,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     const slotSet = {}; // store -> set of "date|slot"
     const dateSet = {}; // store -> set of dates
     rows.forEach((r) => {
-      const store = r[3] || '(unknown)';
+      const store = (r[3] || '(unknown)').trim();
       const areaOfRow = (storeMap[store] || {}).area || '(unknown)';
       const d = r[4] || '', slot = r[5] || '';
       slotSet[store] = slotSet[store] || new Set();
@@ -573,14 +573,6 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       it.total++;
     });
 
-    const perStoreArr = Object.entries(perStore).map(([name, v]) => {
-      const dates = dateSet[name] ? dateSet[name].size : 0;
-      const slotsDone = slotSet[name] ? slotSet[name].size : 0;
-      const slotCompliance = dates ? Math.round((slotsDone / (dates * 3)) * 100) : 0;
-      const pass = v.total ? Math.round((v.y / v.total) * 100) : 0;
-      return { name, area: v.area, y: v.y, n: v.n, total: v.total, slotCompliance, pass, dates, slotsDone };
-    }).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name));
-
     const perItemArr = Object.entries(perItem).map(([name, v]) => ({
       name, y: v.y, n: v.n, total: v.total, pass: v.total ? Math.round((v.y / v.total) * 100) : 0,
     })).sort((a, b) => a.pass - b.pass);
@@ -598,13 +590,13 @@ app.get('/api/store-checks-monitor', async (req, res) => {
         if (storeFilter && storeName !== storeFilter) return false;
         return true;
       })
-      .map((r) => r[4]);
+      .map((r) => (r[4] || '').trim());
 
     // Per-store per-day slot breakdown for consolidated Compliance Log
     const todayLocal = (() => { const d = new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); })();
     const byStoreDate = {}; // "store||date" -> { store, date, slots:{8AM:{y,total},...} }
     rows.forEach((r) => {
-      const store = r[3] || '(unknown)';
+      const store = (r[3] || '(unknown)').trim();
       const d = r[4] || '', slot = r[5] || '';
       if (!d || !slot) return;
       const k = store + '||' + d;
@@ -617,10 +609,21 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       bucket.total++;
     });
     // Ensure every authorized store has a today row so all 20 stores appear even without submissions
+    const areaOf = (name) => (storeMap[name] || {}).area || '(unknown)';
     authorizedStores.forEach((s) => {
       const k = s + '||' + todayLocal;
       if (!byStoreDate[k]) byStoreDate[k] = { store: s, date: todayLocal, slots: {} };
+      // Also seed the Store Compliance aggregate so stores with zero activity still show 0/0
+      if (!perStore[s]) perStore[s] = { y: 0, n: 0, total: 0, area: areaOf(s) };
     });
+    const perStoreArr = Object.entries(perStore).map(([name, v]) => {
+      const dates = dateSet[name] ? dateSet[name].size : 0;
+      const slotsDone = slotSet[name] ? slotSet[name].size : 0;
+      const slotCompliance = dates ? Math.round((slotsDone / (dates * 3)) * 100) : 0;
+      const pass = v.total ? Math.round((v.y / v.total) * 100) : 0;
+      return { name, area: v.area, y: v.y, n: v.n, total: v.total, slotCompliance, pass, dates, slotsDone };
+    }).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name));
+
     const perDay = Object.values(byStoreDate).map((d) => ({
       store: d.store,
       date: d.date,

@@ -1346,15 +1346,23 @@ async function loadCompliance(){
   const days = [...daysMap.values()].sort((a,b) => b.date.localeCompare(a.date));
   const slotStart = { '8AM':7*60, '12PM':11*60, '3PM':14*60 };
   const slotDeadline = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
+  // Rollout cutoff for this store's own log
+  const slotRankSm = { '8AM':1, '12PM':2, '3PM':3 };
+  const keyOfSm = (dt, sl) => dt + '#' + slotRankSm[sl];
+  let earliestKeySm = null;
+  days.forEach(d => d.slots.forEach(s => { if (s.done) { const k = keyOfSm(d.date, s.slot); if (!earliestKeySm || k < earliestKeySm) earliestKeySm = k; } }));
+  const preRolloutSm = (dt, sl) => !!(earliestKeySm && keyOfSm(dt, sl) < earliestKeySm);
   const rows = days.map(d => {
     let expected = 0, doneCount = 0;
     const cells = d.slots.map(s => {
       const isToday = d.date === today;
       const deadlinePassed = isToday ? (mins >= slotDeadline[s.slot]) : (d.date < today);
       const windowOpen  = isToday && mins >= slotStart[s.slot] && mins < slotDeadline[s.slot];
+      const preRollout  = preRolloutSm(d.date, s.slot);
       if (s.done) { doneCount++; expected++; const bg = s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col = s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
         return \`<td style="text-align:center;background:\${bg};color:\${col};font-weight:700;padding:8px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
       }
+      if (preRollout) { return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:8px;border:1px solid #eee" title="Before rollout">&mdash;</td>\`; }
       if (deadlinePassed) { expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:8px;border:1px solid #eee">MISSED</td>\`; }
       if (windowOpen) { return \`<td style="text-align:center;background:#fff5e0;color:#b8860b;font-weight:700;padding:8px;border:1px solid #eee">OPEN</td>\`; }
       return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:8px;border:1px solid #eee">&mdash;</td>\`;
@@ -1425,9 +1433,11 @@ async function loadMonitor(){
       const isToday = d.date === todayM;
       const deadlinePassed = isToday ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
       const windowOpen     = isToday && minsM >= slotStartM[s.slot] && minsM < slotDeadlineM[s.slot];
+      const preRollout     = beforeRollout(d.date, s.slot);
       if (s.done){ doneCount++; expected++; const cbg=s.pass>=80?'#e8f5ec':s.pass>=50?'#fff5e0':'#fee'; const col=s.pass>=80?'#1f7a3a':s.pass>=50?'#b8860b':'#c33';
         return \`<td style="text-align:center;background:\${cbg};color:\${col};font-weight:700;padding:6px;border:1px solid #eee">\${s.pass}% (\${s.y}/\${s.total})</td>\`;
       }
+      if (preRollout) { return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:6px;border:1px solid #eee" title="Before rollout">&mdash;</td>\`; }
       if (deadlinePassed){ expected++; return \`<td style="text-align:center;background:#fee;color:#c33;font-weight:700;padding:6px;border:1px solid #eee">MISSED</td>\`; }
       if (windowOpen){ return \`<td style="text-align:center;background:#fff5e0;color:#b8860b;font-weight:700;padding:6px;border:1px solid #eee">OPEN</td>\`; }
       return \`<td style="text-align:center;background:#f7f7f7;color:#bbb;font-weight:600;padding:6px;border:1px solid #eee">&mdash;</td>\`;
@@ -1437,6 +1447,15 @@ async function loadMonitor(){
     const compTxt = expected===0 ? '-' : (pct + '%');
     return \`<tr><td style="padding:6px;border:1px solid #eee;font-weight:600">\${escapeHtml(d.store)}</td><td style="padding:6px;border:1px solid #eee">\${d.date}\${d.date===todayM?' <span class="muted">(today)</span>':''}</td>\${cells}<td style="text-align:center;padding:6px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td></tr>\`;
   }).join('');
+  // ---- Rollout cutoff: don't count/highlight slots before the very first submission across all stores ----
+  const slotRank = { '8AM': 1, '12PM': 2, '3PM': 3 };
+  const keyOf = (date, slot) => date + '#' + slotRank[slot];
+  let earliestKey = null;
+  (r.perDay || []).forEach(d => d.slots.forEach(s => {
+    if (s.done) { const k = keyOf(d.date, s.slot); if (!earliestKey || k < earliestKey) earliestKey = k; }
+  }));
+  const beforeRollout = (date, slot) => !!(earliestKey && keyOf(date, slot) < earliestKey);
+
   // ---- Dynamic "Stores Without Checklist Submitted" alert card ----
   // Determine most recently ENDED slot today (deadline passed)
   let recentSlot = null;
@@ -1444,7 +1463,7 @@ async function loadMonitor(){
   else if (minsM >= 13*60) recentSlot = '12PM';
   else if (minsM >= 9*60) recentSlot = '8AM';
   let missCard = '';
-  if (recentSlot) {
+  if (recentSlot && !beforeRollout(todayM, recentSlot)) {
     const missed = (r.perDay || []).filter(d => d.date === todayM).map(d => {
       const s = d.slots.find(x => x.slot === recentSlot);
       return { store: d.store, missed: !s || !s.done };
@@ -1480,6 +1499,7 @@ async function loadMonitor(){
   (r.perDay || []).forEach(d => {
     const isToday = d.date === todayM;
     d.slots.forEach(s => {
+      if (beforeRollout(d.date, s.slot)) return; // exclude pre-rollout slots
       const deadlinePassed = isToday ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
       if (!deadlinePassed) return; // only count slots whose deadline has passed
       const key = d.store;

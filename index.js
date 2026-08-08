@@ -883,6 +883,12 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 const S = { manager:null, level:null, storeId:null, storeName:null, particulars:[], ratings:{}, remarks:{}, editingId:null,
             scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null };
 
+// ---- Rollout configuration ----
+// Compliance tracking starts from this date+slot. Earlier slots are shown as '—' and NOT counted
+// in Submitted/Missed totals. Format: 'YYYY-MM-DD#RANK' where RANK: 1=8AM, 2=12PM, 3=3PM.
+// Set to null to auto-detect from the earliest submission in the data.
+const ROLLOUT_START = '2026-08-07#2'; // 12PM on 2026-08-07 = rollout time
+
 // Local date as YYYY-MM-DD (uses browser timezone — NOT UTC — so PH mornings don't get tagged yesterday)
 function todayStr(offsetDays){
   const d = new Date();
@@ -1349,8 +1355,10 @@ async function loadCompliance(){
   // Rollout cutoff for this store's own log
   const slotRankSm = { '8AM':1, '12PM':2, '3PM':3 };
   const keyOfSm = (dt, sl) => dt + '#' + slotRankSm[sl];
-  let earliestKeySm = null;
-  days.forEach(d => d.slots.forEach(s => { if (s.done) { const k = keyOfSm(d.date, s.slot); if (!earliestKeySm || k < earliestKeySm) earliestKeySm = k; } }));
+  let earliestKeySm = ROLLOUT_START;
+  if (!earliestKeySm) {
+    days.forEach(d => d.slots.forEach(s => { if (s.done) { const k = keyOfSm(d.date, s.slot); if (!earliestKeySm || k < earliestKeySm) earliestKeySm = k; } }));
+  }
   const preRolloutSm = (dt, sl) => !!(earliestKeySm && keyOfSm(dt, sl) < earliestKeySm);
   const rows = days.map(d => {
     let expected = 0, doneCount = 0;
@@ -1430,10 +1438,12 @@ async function loadMonitor(){
   // Rollout cutoff (must be declared before it's used in the map below)
   const slotRank = { '8AM': 1, '12PM': 2, '3PM': 3 };
   const keyOf = (date, slot) => date + '#' + slotRank[slot];
-  let earliestKey = null;
-  (r.perDay || []).forEach(d => d.slots.forEach(s => {
-    if (s.done) { const k = keyOf(d.date, s.slot); if (!earliestKey || k < earliestKey) earliestKey = k; }
-  }));
+  let earliestKey = ROLLOUT_START;
+  if (!earliestKey) {
+    (r.perDay || []).forEach(d => d.slots.forEach(s => {
+      if (s.done) { const k = keyOf(d.date, s.slot); if (!earliestKey || k < earliestKey) earliestKey = k; }
+    }));
+  }
   const beforeRollout = (date, slot) => !!(earliestKey && keyOf(date, slot) < earliestKey);
   const perDayRows = (r.perDay||[]).map(d => {
     let expected=0, doneCount=0;

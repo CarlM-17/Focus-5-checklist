@@ -1427,6 +1427,14 @@ async function loadMonitor(){
   const minsM = nowM.getHours()*60 + nowM.getMinutes();
   const slotStartM    = { '8AM':7*60, '12PM':11*60, '3PM':14*60 };
   const slotDeadlineM = { '8AM':9*60, '12PM':13*60, '3PM':16*60 };
+  // Rollout cutoff (must be declared before it's used in the map below)
+  const slotRank = { '8AM': 1, '12PM': 2, '3PM': 3 };
+  const keyOf = (date, slot) => date + '#' + slotRank[slot];
+  let earliestKey = null;
+  (r.perDay || []).forEach(d => d.slots.forEach(s => {
+    if (s.done) { const k = keyOf(d.date, s.slot); if (!earliestKey || k < earliestKey) earliestKey = k; }
+  }));
+  const beforeRollout = (date, slot) => !!(earliestKey && keyOf(date, slot) < earliestKey);
   const perDayRows = (r.perDay||[]).map(d => {
     let expected=0, doneCount=0;
     const cells = d.slots.map(s => {
@@ -1447,14 +1455,6 @@ async function loadMonitor(){
     const compTxt = expected===0 ? '-' : (pct + '%');
     return \`<tr><td style="padding:6px;border:1px solid #eee;font-weight:600">\${escapeHtml(d.store)}</td><td style="padding:6px;border:1px solid #eee">\${d.date}\${d.date===todayM?' <span class="muted">(today)</span>':''}</td>\${cells}<td style="text-align:center;padding:6px;border:1px solid #eee"><span class="pill" style="background:\${compBg}">\${compTxt}</span></td></tr>\`;
   }).join('');
-  // ---- Rollout cutoff: don't count/highlight slots before the very first submission across all stores ----
-  const slotRank = { '8AM': 1, '12PM': 2, '3PM': 3 };
-  const keyOf = (date, slot) => date + '#' + slotRank[slot];
-  let earliestKey = null;
-  (r.perDay || []).forEach(d => d.slots.forEach(s => {
-    if (s.done) { const k = keyOf(d.date, s.slot); if (!earliestKey || k < earliestKey) earliestKey = k; }
-  }));
-  const beforeRollout = (date, slot) => !!(earliestKey && keyOf(date, slot) < earliestKey);
 
   // ---- Dynamic "Stores Without Checklist Submitted" alert card ----
   // Determine most recently ENDED slot today (deadline passed)

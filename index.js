@@ -1475,7 +1475,43 @@ async function loadMonitor(){
       </div>\`;
     }
   }
-  const compLogCard = missCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
+  // ---- Per-Store Submission Summary (across the whole date range) ----
+  const storeAgg = {};
+  (r.perDay || []).forEach(d => {
+    const isToday = d.date === todayM;
+    d.slots.forEach(s => {
+      const deadlinePassed = isToday ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
+      if (!deadlinePassed) return; // only count slots whose deadline has passed
+      const key = d.store;
+      if (!storeAgg[key]) storeAgg[key] = { store: key, submitted: 0, missed: 0, days: new Set() };
+      storeAgg[key].days.add(d.date);
+      if (s.done) storeAgg[key].submitted++;
+      else storeAgg[key].missed++;
+    });
+  });
+  const aggRows = Object.values(storeAgg).map(x => {
+    const total = x.submitted + x.missed;
+    const rate = total ? Math.round((x.submitted / total) * 100) : 0;
+    return { store: x.store, days: x.days.size, submitted: x.submitted, missed: x.missed, total, rate };
+  }).sort((a, b) => b.missed - a.missed || a.rate - b.rate || a.store.localeCompare(b.store));
+  const summaryRowHtml = aggRows.map(x => {
+    const pillBg = x.rate >= 90 ? '#1f7a3a' : x.rate >= 60 ? '#e0a020' : '#c33';
+    const rowBg = x.missed === 0 ? '' : (x.missed >= 3 ? 'background:#fff5f5' : 'background:#fffcf0');
+    return \`<tr style="\${rowBg}">
+      <td style="padding:6px 8px;border:1px solid #eee;font-weight:600">\${escapeHtml(x.store)}</td>
+      <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.days}</td>
+      <td style="padding:6px;border:1px solid #eee;text-align:center;color:#1f7a3a;font-weight:700">\${x.submitted}</td>
+      <td style="padding:6px;border:1px solid #eee;text-align:center;color:#c33;font-weight:700">\${x.missed}</td>
+      <td style="padding:6px;border:1px solid #eee;text-align:center">\${x.total}</td>
+      <td style="padding:6px;border:1px solid #eee;text-align:right"><span class="pill" style="background:\${pillBg}">\${x.rate}%</span></td>
+    </tr>\`;
+  }).join('');
+  const submissionSummaryCard = aggRows.length ? \`<div class="card"><h3 style="margin:0 0 4px;color:#1f7a3a">Store Submission Summary</h3>
+    <div class="muted" style="margin-bottom:8px;font-size:12px">Aggregated across all days in the filter range - sorted by most missed first. Only counts slots whose deadline has passed.</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:60px">Days</th><th style="padding:6px;text-align:center;width:80px">Submitted</th><th style="padding:6px;text-align:center;width:70px">Missed</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:90px">Compliance %</th></tr></thead>
+      <tbody>\${summaryRowHtml}</tbody></table></div></div>\` : '';
+  const compLogCard = missCard + submissionSummaryCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>
       <tbody>\${perDayRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No submissions in this range</td></tr>'}</tbody></table></div></div>\`;

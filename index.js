@@ -883,6 +883,13 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 const S = { manager:null, level:null, storeId:null, storeName:null, particulars:[], ratings:{}, remarks:{}, editingId:null,
             scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null };
 
+// Local date as YYYY-MM-DD (uses browser timezone — NOT UTC — so PH mornings don't get tagged yesterday)
+function todayStr(offsetDays){
+  const d = new Date();
+  if (offsetDays) d.setDate(d.getDate() + offsetDays);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
 function $(q){return document.querySelector(q)}
 function api(url, opts){ return fetch(url, opts).then(r=>r.json()) }
 
@@ -908,14 +915,14 @@ async function enterApp(){
   $('#appScreen').classList.remove('hidden');
   $('#logoutBtn').classList.remove('hidden');
   $('#whoName').textContent = S.manager + ' (' + S.level + ')';
-  $('#date').value = new Date().toISOString().slice(0,10);
+  $('#date').value = todayStr();
   applyRoleUI();
   await loadParticulars();
   const isStoreMgr = (S.level||'').toLowerCase() === 'store manager';
   if (isStoreMgr) {
     $('#scStoreLbl').textContent = S.storeName || '';
     $('#clStoreLbl').textContent = S.storeName || '';
-    $('#scDate').value = new Date().toISOString().slice(0,10);
+    $('#scDate').value = todayStr();
     S.scSlot = autoSlot();
     highlightSlotBtn();
     $('#scSlotLbl').textContent = S.scSlot;
@@ -1077,8 +1084,8 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabMon').classList.toggle('hidden', t!=='mon');
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
   if (t==='hist') loadHistory();
-  if (t==='sum') { if(!$('#sumFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-30); $('#sumFrom').value=d.toISOString().slice(0,10); $('#sumTo').value=to; } loadSummary(); }
-  if (t==='mon') { if(!$('#monFrom').value){ const d=new Date(); const to=d.toISOString().slice(0,10); d.setDate(d.getDate()-14); $('#monFrom').value=d.toISOString().slice(0,10); $('#monTo').value=to; } loadMonitor(); }
+  if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
+  if (t==='mon') { if(!$('#monFrom').value){ $('#monFrom').value = todayStr(-14); $('#monTo').value = todayStr(); } loadMonitor(); }
 });
 
 // Sub-tabs within Store Check
@@ -1224,7 +1231,7 @@ $('#sumExport').onclick = () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Fresh_Compliance_Result_' + new Date().toISOString().slice(0,10) + '.xls';
+  a.download = 'Fresh_Compliance_Result_' + todayStr() + '.xls';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
@@ -1619,7 +1626,7 @@ $('#monExport').onclick = () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Fresh_Compliance_StoreChecks_' + new Date().toISOString().slice(0,10) + '.xls';
+  a.download = 'Fresh_Compliance_StoreChecks_' + todayStr() + '.xls';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };

@@ -406,6 +406,10 @@ app.post('/api/store-submit', async (req, res) => {
       return res.json({ ok: false, error: 'Missing fields' });
     }
     if (!['8AM','12PM','3PM'].includes(slot)) return res.json({ ok:false, error:'Invalid slot' });
+    // Reject back-dated submissions (client sends its local date; allow only that same date server-observed, or today)
+    // Compare loosely: accept if client date >= yesterday PH-ish (2-day window covers timezone drift). Reject anything older.
+    const twoDaysAgo = new Date(Date.now() - 2*86400*1000).toISOString().slice(0,10);
+    if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
     const ts = new Date().toISOString();
     const id = auditId || 'S' + Date.now();
     // Supersede any earlier active submission for same store/date/slot (or the same auditId when editing)
@@ -825,7 +829,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <div class="card">
       <div style="font-weight:600;color:#1f7a3a">Store: <span id="scStoreLbl"></span></div>
       <div style="margin-top:8px" class="row">
-        <div><label>Date</label><input id="scDate" type="date"/></div>
+        <div><label>Date</label><input id="scDate" type="date" readonly style="background:#f2f2f2;color:#556;cursor:not-allowed"/></div>
         <div>
           <label>Slot</label>
           <div style="display:flex;gap:6px">
@@ -1092,6 +1096,7 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
   if (t==='mon') { if(!$('#monFrom').value){ $('#monFrom').value = todayStr(-14); $('#monTo').value = todayStr(); } loadMonitor(); }
+  if (t==='scheck') { $('#scDate').value = todayStr(); S.scSlot = autoSlot(); $('#scSlotLbl').textContent = S.scSlot; if (typeof highlightSlotBtn === 'function') highlightSlotBtn(); }
 });
 
 // Sub-tabs within Store Check
@@ -1102,6 +1107,7 @@ document.querySelectorAll('#tabSCheck .tabs button[data-subtab]').forEach(b => b
   $('#scSubNew').classList.toggle('hidden', st!=='new');
   $('#scSubHist').classList.toggle('hidden', st!=='hist');
   $('#scSubClog').classList.toggle('hidden', st!=='clog');
+  if (st==='new') { $('#scDate').value = todayStr(); S.scSlot = autoSlot(); $('#scSlotLbl').textContent = S.scSlot; highlightSlotBtn(); }
   if (st==='hist') loadStoreCheckHistory();
   if (st==='clog') loadCompliance();
 });
@@ -1320,6 +1326,7 @@ $('#scSubmit').onclick = async () => {
   $('#scErr').textContent = '';
   const date = $('#scDate').value;
   if (!date || !S.scSlot) { $('#scErr').textContent = 'Date and slot required'; return; }
+  if (date !== todayStr()) { $('#scErr').textContent = 'Back-dated checklists are not allowed. Refreshing to today.'; $('#scDate').value = todayStr(); return; }
   const entries = S.particulars.map((p,i) => ({ category:p.category, item:p.item, result:S.scResults['k'+i]||'', remarks:S.scRemarks['k'+i]||'' }));
   const btn = $('#scSubmit'); btn.disabled = true; btn.textContent = 'Uploading...';
   const r = await api('/api/store-submit', {method:'POST', headers:{'Content-Type':'application/json'},

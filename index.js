@@ -622,12 +622,26 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       else if (result === 'N') bucket.n++;
       bucket.total++;
     });
-    // Ensure every authorized store has a today row so all 20 stores appear even without submissions
+    // Ensure every authorized store has an entry for EVERY day in the filter range,
+    // so days when the store submitted nothing still count in the Days / Missed columns.
     const areaOf = (name) => (storeMap[name] || {}).area || '(unknown)';
+    const rangeDates = [];
+    if (from && to) {
+      // Iterate calendar dates from `from` to min(to, today)
+      const dFrom = new Date(from + 'T00:00:00');
+      const dTo   = new Date(to   + 'T00:00:00');
+      const dCap  = new Date(todayLocal + 'T00:00:00');
+      const dEnd  = dTo < dCap ? dTo : dCap;
+      for (let d = new Date(dFrom); d <= dEnd; d.setDate(d.getDate()+1)) {
+        rangeDates.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));
+      }
+    }
+    if (!rangeDates.length) rangeDates.push(todayLocal);
     authorizedStores.forEach((s) => {
-      const k = s + '||' + todayLocal;
-      if (!byStoreDate[k]) byStoreDate[k] = { store: s, date: todayLocal, slots: {} };
-      // Also seed the Store Compliance aggregate so stores with zero activity still show 0/0
+      rangeDates.forEach((dt) => {
+        const k = s + '||' + dt;
+        if (!byStoreDate[k]) byStoreDate[k] = { store: s, date: dt, slots: {} };
+      });
       if (!perStore[s]) perStore[s] = { y: 0, n: 0, total: 0, area: areaOf(s) };
     });
     const perStoreArr = Object.entries(perStore).map(([name, v]) => {

@@ -384,12 +384,13 @@ function normalizeSlot(raw) {
   if (s === '3PM'  || /^0?3:00(:00)?\s*PM$|^15:00(:00)?$/.test(s)) return '3PM';
   return s;
 }
-async function markStoreEdited(auditId, store, date, slot) {
+async function markStoreEdited(auditId, store, date, slot, newId) {
   const rows = await sheetsGet('StoreChecklistData!A2:K');
   const data = [];
   rows.forEach((r, i) => {
     const isActive = (r[10] || 'ACTIVE') === 'ACTIVE';
     if (!isActive) return;
+    if (newId && r[1] === newId) return; // never mark the row we just appended
     // Match by auditId OR by same store+date+slot (replace prior slot submission)
     const match = auditId
       ? r[1] === auditId
@@ -412,8 +413,6 @@ app.post('/api/store-submit', async (req, res) => {
     if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
     const ts = new Date().toISOString();
     const id = auditId || 'S' + Date.now();
-    // Supersede any earlier active submission for same store/date/slot (or the same auditId when editing)
-    await markStoreEdited(auditId, store, date, slot);
     const rows = entries.map((e) => [
       ts, id, login, store, date, slot,
       e.category || '', e.item || '',
@@ -424,7 +423,10 @@ app.post('/api/store-submit', async (req, res) => {
     if (generalNotes && generalNotes.trim()) {
       rows.push([ts, id, login, store, date, slot, 'AUDIT NOTES', 'General Notes', '', generalNotes.trim(), 'ACTIVE']);
     }
+    // Append the new ACTIVE rows FIRST — only then supersede prior rows. If the append fails,
+    // the sheet is left untouched so we never orphan data (old ACTIVE remains, no MISSED).
     await sheetsAppend('StoreChecklistData!A1:K1', rows);
+    try { await markStoreEdited(auditId, store, date, slot, id); } catch (_) { /* non-fatal — new rows already written */ }
     res.json({ ok: true, auditId: id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

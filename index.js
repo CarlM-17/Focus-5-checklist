@@ -1562,12 +1562,91 @@ async function loadMonitor(){
   const rangeFrom = $('#monFrom').value || '';
   const rangeTo   = $('#monTo').value   || '';
   const rangeLbl  = (rangeFrom && rangeTo) ? (rangeFrom === rangeTo ? rangeFrom : rangeFrom + ' to ' + rangeTo) : (rangeFrom || rangeTo || 'All dates');
+  // ---- Weekly Ranking (Mon-Sun weeks, ranked by average pass %) ----
+  const weekOf = (dateStr) => {
+    const dt = new Date(dateStr + 'T00:00:00');
+    dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+    return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+  };
+  const MONTHS_S = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtWeek = (mondayStr) => {
+    const mon = new Date(mondayStr + 'T00:00:00');
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    return mon.getMonth() === sun.getMonth()
+      ? \`\${MONTHS_S[mon.getMonth()]} \${mon.getDate()}-\${sun.getDate()}\`
+      : \`\${MONTHS_S[mon.getMonth()]} \${mon.getDate()} - \${MONTHS_S[sun.getMonth()]} \${sun.getDate()}\`;
+  };
+  const weekSetR = new Set();
+  const storeWeek = {}; // "store||weekKey" -> { y, total }
+  const storesInScope = new Set();
+  (r.perDay || []).forEach(d => {
+    weekSetR.add(weekOf(d.date));
+    storesInScope.add(d.store);
+    d.slots.forEach(s => {
+      if (!s.done) return;
+      if (beforeRollout(d.date, s.slot)) return;
+      const wk = weekOf(d.date);
+      const k = d.store + '||' + wk;
+      if (!storeWeek[k]) storeWeek[k] = { y: 0, total: 0 };
+      storeWeek[k].y += s.y;
+      storeWeek[k].total += s.total;
+    });
+  });
+  const weeksR = [...weekSetR].sort();
+  const isPartial = (wk) => {
+    const mon = new Date(wk + 'T00:00:00');
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    const rangeStart = rangeFrom ? new Date(rangeFrom + 'T00:00:00') : null;
+    const rangeEnd = rangeTo ? new Date(rangeTo + 'T00:00:00') : null;
+    const todayD = new Date(todayM + 'T00:00:00');
+    const effectiveEnd = (rangeEnd && rangeEnd < todayD) ? rangeEnd : todayD;
+    return (rangeStart && rangeStart > mon) || (effectiveEnd < sun);
+  };
+  const rankData = [...storesInScope].map(store => {
+    const weekPcts = weeksR.map(w => {
+      const rec = storeWeek[store + '||' + w];
+      if (!rec || rec.total === 0) return null;
+      return Math.round((rec.y / rec.total) * 100);
+    });
+    const valid = weekPcts.filter(v => v !== null);
+    const avg = valid.length ? Math.round(valid.reduce((a,b) => a+b, 0) / valid.length) : null;
+    return { store, weekPcts, avg };
+  }).sort((a, b) => {
+    if (a.avg === null && b.avg === null) return a.store.localeCompare(b.store);
+    if (a.avg === null) return 1;
+    if (b.avg === null) return -1;
+    return a.avg - b.avg || a.store.localeCompare(b.store);
+  });
+  const cellBg  = p => p===null ? '#f7f7f7' : (p >= 90 ? '#e8f5ec' : p >= 60 ? '#fff5e0' : '#fee');
+  const cellCol = p => p===null ? '#bbb'    : (p >= 90 ? '#1f7a3a' : p >= 60 ? '#b8860b' : '#c33');
+  const medal   = i => i < 3 ? '#c33' : i < 6 ? '#e0a020' : '#1f7a3a';
+  const wkHeaders = weeksR.map(w => \`<th style="padding:6px;text-align:center;min-width:100px;font-weight:500">\${fmtWeek(w)}\${isPartial(w) ? ' <span style="font-size:10px;color:#a55;font-weight:400">(partial)</span>' : ''}</th>\`).join('');
+  const wkRows = rankData.map((rd, i) => {
+    const cells = rd.weekPcts.map(p => \`<td style="padding:6px;text-align:center;background:\${cellBg(p)};color:\${cellCol(p)};font-weight:700;border:1px solid #eee">\${p===null?'&mdash;':(p+'%')}</td>\`).join('');
+    return \`<tr>
+      <td style="padding:6px;text-align:center;background:\${medal(i)};color:#fff;font-weight:700;border:1px solid #eee">\${i+1}</td>
+      <td style="padding:6px 8px;font-weight:600;border:1px solid #eee">\${escapeHtml(rd.store)}</td>
+      \${cells}
+      <td style="padding:6px;text-align:center;background:\${cellBg(rd.avg)};color:\${cellCol(rd.avg)};font-weight:800;border:1px solid #eee">\${rd.avg===null?'&mdash;':(rd.avg+'%')}</td>
+    </tr>\`;
+  }).join('');
+  const weeklyRankCard = (weeksR.length && rankData.length) ? \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+      <h3 style="margin:0;color:#1f7a3a">Weekly Ranking</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
+    </div>
+    <div class="muted" style="margin-bottom:8px;font-size:12px">Pass % per Mon-Sun week. Avg gives each week equal weight. Weeks with no submissions show &mdash; and are excluded from the Avg.</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#eef"><th style="padding:6px;width:50px;text-align:center">Rank</th><th style="padding:6px;text-align:left">Store</th>\${wkHeaders}<th style="padding:6px;text-align:center;width:80px">Avg</th></tr></thead>
+      <tbody>\${wkRows}</tbody></table></div>
+  </div>\` : '';
+
   const submissionSummaryCard = aggRows.length ? \`<div class="card"><div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px"><h3 style="margin:0;color:#1f7a3a">Store Submission Summary</h3><span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${escapeHtml(rangeLbl)}</span></div>
     <div class="muted" style="margin-bottom:8px;font-size:12px">Aggregated across all days in the filter range - sorted by most missed first. Only counts slots whose deadline has passed.</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:60px">Days</th><th style="padding:6px;text-align:center;width:80px">Submitted</th><th style="padding:6px;text-align:center;width:70px">Missed</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:90px">Compliance %</th></tr></thead>
       <tbody>\${summaryRowHtml}</tbody></table></div></div>\` : '';
-  const compLogCard = missCard + submissionSummaryCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
+  const compLogCard = missCard + submissionSummaryCard + weeklyRankCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>
       <tbody>\${perDayRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No submissions in this range</td></tr>'}</tbody></table></div></div>\`;

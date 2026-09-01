@@ -654,6 +654,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
 
     const perDay = Object.values(byStoreDate).map((d) => ({
       store: d.store,
+      area: (storeMap[d.store] || {}).area || '(unknown)',
       date: d.date,
       slots: ['8AM', '12PM', '3PM'].map((s) => {
         const v = d.slots[s];
@@ -1578,21 +1579,31 @@ async function loadMonitor(){
       : \`\${MONTHS_S[mon.getMonth()]} \${mon.getDate()} - \${MONTHS_S[sun.getMonth()]} \${sun.getDate()}\`;
   };
   const weekSetR = new Set();
-  const storeWeek = {}; // "store||weekKey" -> { submitted, expected }  (slot compliance, matches Summary)
+  const storeWeek = {}; // "store||weekKey" -> { submitted, expected }
+  const areaWeek  = {}; // "area||weekKey"  -> { submitted, expected }
   const storesInScope = new Set();
+  const areasInScope  = new Set();
+  const storeArea = {}; // store -> area (for display)
   (r.perDay || []).forEach(d => {
     weekSetR.add(weekOf(d.date));
     storesInScope.add(d.store);
+    const areaName = d.area || '(unknown)';
+    areasInScope.add(areaName);
+    storeArea[d.store] = areaName;
     const isTodayR = d.date === todayM;
     d.slots.forEach(s => {
       if (beforeRollout(d.date, s.slot)) return;
       const deadlinePassedR = isTodayR ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
-      if (!deadlinePassedR) return; // only count slots whose deadline has passed
+      if (!deadlinePassedR) return;
       const wk = weekOf(d.date);
-      const k = d.store + '||' + wk;
-      if (!storeWeek[k]) storeWeek[k] = { submitted: 0, expected: 0 };
-      storeWeek[k].expected += 1;
-      if (s.done) storeWeek[k].submitted += 1;
+      const sk = d.store + '||' + wk;
+      if (!storeWeek[sk]) storeWeek[sk] = { submitted: 0, expected: 0 };
+      storeWeek[sk].expected += 1;
+      if (s.done) storeWeek[sk].submitted += 1;
+      const ak = areaName + '||' + wk;
+      if (!areaWeek[ak]) areaWeek[ak] = { submitted: 0, expected: 0 };
+      areaWeek[ak].expected += 1;
+      if (s.done) areaWeek[ak].submitted += 1;
     });
   });
   const weeksR = [...weekSetR].sort();
@@ -1623,19 +1634,22 @@ async function loadMonitor(){
   const cellBg  = p => p===null ? '#f7f7f7' : (p >= 90 ? '#e8f5ec' : p >= 60 ? '#fff5e0' : '#fee');
   const cellCol = p => p===null ? '#bbb'    : (p >= 90 ? '#1f7a3a' : p >= 60 ? '#b8860b' : '#c33');
   const medal   = i => i < 3 ? '#c33' : i < 6 ? '#e0a020' : '#1f7a3a';
-  const wkHeaders = weeksR.map(w => \`<th style="padding:6px;text-align:center;min-width:100px;font-weight:500">\${fmtWeek(w)}\${isPartial(w) ? ' <span style="font-size:10px;color:#a55;font-weight:400">(partial)</span>' : ''}</th>\`).join('');
+
+  // Compact styling so the table fits without a scrollbar
+  const wkColW = Math.max(48, Math.floor(460 / Math.max(1, weeksR.length))); // shared budget across week cols
+  const wkHeaders = weeksR.map(w => \`<th style="padding:4px 2px;text-align:center;width:\${wkColW}px;font-weight:500;font-size:11px;line-height:1.15">\${fmtWeek(w)}\${isPartial(w) ? '<div style="font-size:9px;color:#a55;font-weight:400">(partial)</div>' : ''}</th>\`).join('');
   const wkRows = rankData.map((rd, i) => {
-    const cells = rd.weekPcts.map(p => \`<td style="padding:6px;text-align:center;background:\${cellBg(p)};color:\${cellCol(p)};font-weight:700;border:1px solid #eee">\${p===null?'&mdash;':(p+'%')}</td>\`).join('');
+    const cells = rd.weekPcts.map(p => \`<td style="padding:4px 2px;text-align:center;background:\${cellBg(p)};color:\${cellCol(p)};font-weight:700;border:1px solid #eee;font-size:12px">\${p===null?'&mdash;':(p+'%')}</td>\`).join('');
     return \`<tr>
-      <td style="padding:6px;text-align:center;background:\${medal(i)};color:#fff;font-weight:700;border:1px solid #eee">\${i+1}</td>
-      <td style="padding:6px 8px;font-weight:600;border:1px solid #eee">\${escapeHtml(rd.store)}</td>
+      <td style="padding:4px 2px;text-align:center;background:\${medal(i)};color:#fff;font-weight:700;border:1px solid #eee;font-size:12px">\${i+1}</td>
+      <td style="padding:4px 6px;font-weight:600;border:1px solid #eee;font-size:12px;line-height:1.2;word-break:break-word">\${escapeHtml(rd.store)}</td>
       \${cells}
-      <td style="padding:6px;text-align:center;background:\${cellBg(rd.avg)};color:\${cellCol(rd.avg)};font-weight:800;border:1px solid #eee">\${rd.avg===null?'&mdash;':(rd.avg+'%')}</td>
+      <td style="padding:4px 2px;text-align:center;background:\${cellBg(rd.avg)};color:\${cellCol(rd.avg)};font-weight:800;border:1px solid #eee;font-size:12px">\${rd.avg===null?'&mdash;':(rd.avg+'%')}</td>
     </tr>\`;
   }).join('');
   const weeklyRankCard = (weeksR.length && rankData.length) ? \`<div class="card">
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px">
-      <h3 style="margin:0;color:#1f7a3a">Weekly Ranking</h3>
+      <h3 style="margin:0;color:#1f7a3a">Weekly Ranking - Per Store</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
     </div>
     <div style="margin-bottom:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:13px;line-height:1.55;color:#5a4300">
@@ -1647,9 +1661,45 @@ async function loadMonitor(){
       brief your team, set alarms per slot, and ensure the app is opened and submitted before the deadline.
       Late or missed checks affect your store's overall performance and area standing.
     </div>
-    <div class="noScroll" style="overflow-x:auto;-ms-overflow-style:none;scrollbar-width:none"><table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead><tr style="background:#eef"><th style="padding:6px;width:50px;text-align:center">Rank</th><th style="padding:6px;text-align:left">Store</th>\${wkHeaders}<th style="padding:6px;text-align:center;width:80px">Avg</th></tr></thead>
-      <tbody>\${wkRows}</tbody></table></div>
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <thead><tr style="background:#eef"><th style="padding:4px;width:36px;text-align:center;font-size:11px">Rank</th><th style="padding:4px 6px;text-align:left;width:90px;font-size:11px">Store</th>\${wkHeaders}<th style="padding:4px;text-align:center;width:52px;font-size:11px">Avg</th></tr></thead>
+      <tbody>\${wkRows}</tbody></table>
+  </div>\` : '';
+
+  // ---- Per-Area weekly ranking ----
+  const areaRankData = [...areasInScope].map(area => {
+    const weekPcts = weeksR.map(w => {
+      const rec = areaWeek[area + '||' + w];
+      if (!rec || rec.expected === 0) return null;
+      return Math.round((rec.submitted / rec.expected) * 100);
+    });
+    const valid = weekPcts.filter(v => v !== null);
+    const avg = valid.length ? Math.round(valid.reduce((a,b) => a+b, 0) / valid.length) : null;
+    return { area, weekPcts, avg };
+  }).sort((a, b) => {
+    if (a.avg === null && b.avg === null) return a.area.localeCompare(b.area);
+    if (a.avg === null) return 1;
+    if (b.avg === null) return -1;
+    return a.avg - b.avg || a.area.localeCompare(b.area);
+  });
+  const areaWkRows = areaRankData.map((rd, i) => {
+    const cells = rd.weekPcts.map(p => \`<td style="padding:4px 2px;text-align:center;background:\${cellBg(p)};color:\${cellCol(p)};font-weight:700;border:1px solid #eee;font-size:12px">\${p===null?'&mdash;':(p+'%')}</td>\`).join('');
+    return \`<tr>
+      <td style="padding:4px 2px;text-align:center;background:\${medal(i)};color:#fff;font-weight:700;border:1px solid #eee;font-size:12px">\${i+1}</td>
+      <td style="padding:4px 6px;font-weight:600;border:1px solid #eee;font-size:12px;line-height:1.2;word-break:break-word">\${escapeHtml(rd.area)}</td>
+      \${cells}
+      <td style="padding:4px 2px;text-align:center;background:\${cellBg(rd.avg)};color:\${cellCol(rd.avg)};font-weight:800;border:1px solid #eee;font-size:12px">\${rd.avg===null?'&mdash;':(rd.avg+'%')}</td>
+    </tr>\`;
+  }).join('');
+  const areaRankCard = (weeksR.length && areaRankData.length) ? \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+      <h3 style="margin:0;color:#1f7a3a">Weekly Ranking - Per Area</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
+    </div>
+    <div class="muted" style="margin-bottom:8px;font-size:12px">Same metric aggregated at the area level. All stores in that area contribute to the area's weekly slot compliance %.</div>
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <thead><tr style="background:#eef"><th style="padding:4px;width:36px;text-align:center;font-size:11px">Rank</th><th style="padding:4px 6px;text-align:left;width:130px;font-size:11px">Area</th>\${wkHeaders}<th style="padding:4px;text-align:center;width:52px;font-size:11px">Avg</th></tr></thead>
+      <tbody>\${areaWkRows}</tbody></table>
   </div>\` : '';
 
   const submissionSummaryCard = aggRows.length ? \`<div class="card"><div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px"><h3 style="margin:0;color:#1f7a3a">Store Submission Summary</h3><span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${escapeHtml(rangeLbl)}</span></div>
@@ -1657,7 +1707,7 @@ async function loadMonitor(){
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:60px">Days</th><th style="padding:6px;text-align:center;width:80px">Submitted</th><th style="padding:6px;text-align:center;width:70px">Missed</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:90px">Compliance %</th></tr></thead>
       <tbody>\${summaryRowHtml}</tbody></table></div></div>\` : '';
-  const compLogCard = missCard + submissionSummaryCard + weeklyRankCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
+  const compLogCard = missCard + submissionSummaryCard + weeklyRankCard + areaRankCard + \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Compliance Log</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:center">8AM</th><th style="padding:6px;text-align:center">12PM</th><th style="padding:6px;text-align:center">3PM</th><th style="padding:6px;text-align:center;width:70px">Slot %</th></tr></thead>
       <tbody>\${perDayRows||'<tr><td colspan="6" style="padding:10px;text-align:center;color:#789">No submissions in this range</td></tr>'}</tbody></table></div></div>\`;

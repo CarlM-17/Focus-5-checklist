@@ -1637,7 +1637,15 @@ async function loadMonitor(){
       <h3 style="margin:0;color:#1f7a3a">Weekly Ranking</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
     </div>
-    <div class="muted" style="margin-bottom:8px;font-size:12px">Slot compliance % per Mon-Sun week (slots submitted / slots whose deadline passed). Avg gives each week equal weight. Weeks with no expected slots show &mdash; and are excluded from the Avg. Matches the Compliance % column above.</div>
+    <div style="margin-bottom:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:13px;line-height:1.55;color:#5a4300">
+      <b style="color:#a06800">NOTE TO ALL STORES:</b>
+      This ranking reflects how consistently your store completes the 3 daily checklists.
+      Please make sure each check is submitted within its window:
+      <b>8AM (07:00-09:00)</b>, <b>12PM (11:00-13:00)</b>, <b>3PM (14:00-16:00)</b>.
+      Target is <b>100% every week</b>. Stores at the top of this list (red rank) need immediate action -
+      brief your team, set alarms per slot, and ensure the app is opened and submitted before the deadline.
+      Late or missed checks affect your store's overall performance and area standing.
+    </div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;width:50px;text-align:center">Rank</th><th style="padding:6px;text-align:left">Store</th>\${wkHeaders}<th style="padding:6px;text-align:center;width:80px">Avg</th></tr></thead>
       <tbody>\${wkRows}</tbody></table></div>

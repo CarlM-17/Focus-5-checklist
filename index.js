@@ -1577,19 +1577,21 @@ async function loadMonitor(){
       : \`\${MONTHS_S[mon.getMonth()]} \${mon.getDate()} - \${MONTHS_S[sun.getMonth()]} \${sun.getDate()}\`;
   };
   const weekSetR = new Set();
-  const storeWeek = {}; // "store||weekKey" -> { y, total }
+  const storeWeek = {}; // "store||weekKey" -> { submitted, expected }  (slot compliance, matches Summary)
   const storesInScope = new Set();
   (r.perDay || []).forEach(d => {
     weekSetR.add(weekOf(d.date));
     storesInScope.add(d.store);
+    const isTodayR = d.date === todayM;
     d.slots.forEach(s => {
-      if (!s.done) return;
       if (beforeRollout(d.date, s.slot)) return;
+      const deadlinePassedR = isTodayR ? (minsM >= slotDeadlineM[s.slot]) : (d.date < todayM);
+      if (!deadlinePassedR) return; // only count slots whose deadline has passed
       const wk = weekOf(d.date);
       const k = d.store + '||' + wk;
-      if (!storeWeek[k]) storeWeek[k] = { y: 0, total: 0 };
-      storeWeek[k].y += s.y;
-      storeWeek[k].total += s.total;
+      if (!storeWeek[k]) storeWeek[k] = { submitted: 0, expected: 0 };
+      storeWeek[k].expected += 1;
+      if (s.done) storeWeek[k].submitted += 1;
     });
   });
   const weeksR = [...weekSetR].sort();
@@ -1605,8 +1607,8 @@ async function loadMonitor(){
   const rankData = [...storesInScope].map(store => {
     const weekPcts = weeksR.map(w => {
       const rec = storeWeek[store + '||' + w];
-      if (!rec || rec.total === 0) return null;
-      return Math.round((rec.y / rec.total) * 100);
+      if (!rec || rec.expected === 0) return null;
+      return Math.round((rec.submitted / rec.expected) * 100);
     });
     const valid = weekPcts.filter(v => v !== null);
     const avg = valid.length ? Math.round(valid.reduce((a,b) => a+b, 0) / valid.length) : null;
@@ -1635,7 +1637,7 @@ async function loadMonitor(){
       <h3 style="margin:0;color:#1f7a3a">Weekly Ranking</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
     </div>
-    <div class="muted" style="margin-bottom:8px;font-size:12px">Pass % per Mon-Sun week. Avg gives each week equal weight. Weeks with no submissions show &mdash; and are excluded from the Avg.</div>
+    <div class="muted" style="margin-bottom:8px;font-size:12px">Slot compliance % per Mon-Sun week (slots submitted / slots whose deadline passed). Avg gives each week equal weight. Weeks with no expected slots show &mdash; and are excluded from the Avg. Matches the Compliance % column above.</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;width:50px;text-align:center">Rank</th><th style="padding:6px;text-align:left">Store</th>\${wkHeaders}<th style="padding:6px;text-align:center;width:80px">Avg</th></tr></thead>
       <tbody>\${wkRows}</tbody></table></div>

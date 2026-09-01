@@ -690,6 +690,7 @@ const HTML = `<!doctype html>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:rgba(0,0,0,0)}
 html,body{overscroll-behavior-y:contain}
+.noScroll::-webkit-scrollbar{display:none;width:0;height:0}
 body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f8;color:#222;padding-bottom:env(safe-area-inset-bottom)}
 header{background:#1f7a3a;color:#fff;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;gap:8px}
 header h1{margin:0;font-size:16px;line-height:1.2}
@@ -1646,7 +1647,7 @@ async function loadMonitor(){
       brief your team, set alarms per slot, and ensure the app is opened and submitted before the deadline.
       Late or missed checks affect your store's overall performance and area standing.
     </div>
-    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+    <div class="noScroll" style="overflow-x:auto;-ms-overflow-style:none;scrollbar-width:none"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;width:50px;text-align:center">Rank</th><th style="padding:6px;text-align:left">Store</th>\${wkHeaders}<th style="padding:6px;text-align:center;width:80px">Avg</th></tr></thead>
       <tbody>\${wkRows}</tbody></table></div>
   </div>\` : '';

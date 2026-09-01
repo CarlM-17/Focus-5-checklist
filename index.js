@@ -1559,7 +1559,10 @@ async function loadMonitor(){
       <td style="padding:6px;border:1px solid #eee;text-align:right"><span class="pill" style="background:\${pillBg}">\${x.rate}%</span></td>
     </tr>\`;
   }).join('');
-  const submissionSummaryCard = aggRows.length ? \`<div class="card"><h3 style="margin:0 0 4px;color:#1f7a3a">Store Submission Summary</h3>
+  const rangeFrom = $('#monFrom').value || '';
+  const rangeTo   = $('#monTo').value   || '';
+  const rangeLbl  = (rangeFrom && rangeTo) ? (rangeFrom === rangeTo ? rangeFrom : rangeFrom + ' to ' + rangeTo) : (rangeFrom || rangeTo || 'All dates');
+  const submissionSummaryCard = aggRows.length ? \`<div class="card"><div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px"><h3 style="margin:0;color:#1f7a3a">Store Submission Summary</h3><span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${escapeHtml(rangeLbl)}</span></div>
     <div class="muted" style="margin-bottom:8px;font-size:12px">Aggregated across all days in the filter range - sorted by most missed first. Only counts slots whose deadline has passed.</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:#eef"><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:center;width:60px">Days</th><th style="padding:6px;text-align:center;width:80px">Submitted</th><th style="padding:6px;text-align:center;width:70px">Missed</th><th style="padding:6px;text-align:center;width:60px">Total</th><th style="padding:6px;text-align:right;width:90px">Compliance %</th></tr></thead>

@@ -2137,20 +2137,33 @@ async function loadStockTab(){
   }
 
   // Reports table (RM sees all, AM sees their own history)
-  const reportsHtml = monRes.reports.length ? monRes.reports.slice(0,50).map(r => {
+  const reportsHtml = monRes.reports.length ? monRes.reports.slice(0,100).map(r => {
     const cats = STOCK_CATS.map(c => {
       const cat = r.categories[c.name];
       if (!cat) return \`<td style="padding:4px;text-align:center;background:#f7f7f7;color:#bbb">-</td>\`;
       const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789', fg:'#fff' };
-      return \`<td style="padding:4px;text-align:center;background:\${opt.bg};color:\${opt.fg};font-weight:700;font-size:11px" title="\${escapeHtml(cat.remarks||'')}">\${cat.status}</td>\`;
+      return \`<td style="padding:4px;text-align:center;background:\${opt.bg};color:\${opt.fg};font-weight:700;font-size:11px">\${cat.status}</td>\`;
     }).join('');
     const badge = r.onTime ? '<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>' : '<span class="pill" style="background:#c33;font-size:10px">LATE</span>';
-    return \`<tr>
+    const remarkPanels = STOCK_CATS.map(c => {
+      const cat = r.categories[c.name];
+      if (!cat || !cat.remarks) return '';
+      const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789' };
+      return \`<div style="padding:6px 10px;background:#f8fafb;border-left:3px solid \${opt.bg};margin:4px 0;font-size:12px;border-radius:0 4px 4px 0">
+        <b style="color:#1f7a3a">\${c.icon} \${c.name}</b> <span style="color:#\${opt.bg.slice(1)};font-weight:700;font-size:11px">[\${cat.status}]</span>: \${escapeHtml(cat.remarks)}
+      </div>\`;
+    }).join('');
+    const remarkContent = remarkPanels || '<div style="color:#789;padding:6px;font-size:12px;font-style:italic">No remarks provided</div>';
+    return \`<tr onclick="toggleReportRemarks('\${r.reportId}')" style="cursor:pointer" onmouseover="this.style.background='#f4faf6'" onmouseout="this.style.background=''">
       <td style="padding:4px 8px;font-weight:600;font-size:12px">\${escapeHtml(r.manager)}</td>
       <td style="padding:4px 8px;font-size:12px">\${escapeHtml(r.date)}</td>
       <td style="padding:4px;text-align:center">\${badge}</td>
       \${cats}
       <td style="padding:4px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
+      <td style="padding:4px 6px;text-align:center;color:#1f7a3a;font-size:14px" title="Click to view remarks">&#9660;</td>
+    </tr>
+    <tr id="rpt_\${r.reportId}" style="display:none;background:#fbfcfa">
+      <td colspan="\${4+STOCK_CATS.length+1}" style="padding:8px 12px">\${remarkContent}</td>
     </tr>\`;
   }).join('') : '';
   const streakChip = (am) => {
@@ -2215,7 +2228,12 @@ async function loadStockTab(){
       </div>\`;
     }).join('')}
   </div>\`;
-  const tableCard = \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Reports (Today)</h3>
+  const tableCard = \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <h3 style="margin:0;color:#1f7a3a">Reports</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">Click any row to view the remarks for each category.</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:#eef">
         <th style="padding:6px 8px;text-align:left">Area Manager</th>
@@ -2223,11 +2241,12 @@ async function loadStockTab(){
         <th style="padding:6px;text-align:center">Status</th>
         \${STOCK_CATS.map(c => '<th style="padding:6px;text-align:center;width:70px">'+c.icon+' '+c.name+'</th>').join('')}
         <th style="padding:6px 8px;text-align:left">Submitted At</th>
+        <th style="padding:6px;text-align:center;width:30px"></th>
       </tr></thead>
-      <tbody>\${reportsHtml || '<tr><td colspan="'+(4+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports today yet</td></tr>'}</tbody>
+      <tbody>\${reportsHtml || '<tr><td colspan="'+(5+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports in this range</td></tr>'}</tbody>
     </table></div></div>\`;
 
-  $('#stockOut').innerHTML = kpiRow + missingHtml + chartCard + formCard + tableCard + historyCard + filterCard;
+  $('#stockOut').innerHTML = kpiRow + filterCard + missingHtml + chartCard + formCard + tableCard + historyCard;
 
   $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; loadStockTab(); };
   $('#stockExportBtn').onclick = exportStockExcel;
@@ -2275,6 +2294,12 @@ function renderStockForm(){
 function toggleAMHistory(am){
   STOCK_STATE.expanded[am] = !STOCK_STATE.expanded[am];
   loadStockTab();
+}
+
+function toggleReportRemarks(id){
+  const el = document.getElementById('rpt_' + id);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
 }
 
 function exportStockExcel(){

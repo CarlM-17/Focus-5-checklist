@@ -2419,4 +2419,4 @@ if (remembered) {
 
 app.get('/', (req, res) => res.type('html').send(HTML));
 
-app.listen(PORT, () => console.log('Fresh Focus 5 Checklist listening on', PORT
+app.listen(PORT, () => console.log('Fresh Focus 5 Checklist listening on', PORT));

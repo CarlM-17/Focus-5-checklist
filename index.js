@@ -685,13 +685,13 @@ const STOCK_STATUSES   = ['OOS','Critical','Healthy'];
 const STOCK_ROLLOUT = process.env.STOCK_ROLLOUT || '2026-09-05';
 
 async function markStockEdited(manager, date, newId) {
-  const rows = await sheetsGet('StockStatus!A2:H');
+  const rows = await sheetsGet('StockStatus!A2:I');
   const data = [];
   rows.forEach((r, i) => {
-    if ((r[7] || 'ACTIVE') !== 'ACTIVE') return;
-    if (newId && r[1] === newId) return; // never mark the row we just appended
+    if ((r[8] || 'ACTIVE') !== 'ACTIVE') return;
+    if (newId && r[1] === newId) return;
     if ((r[2] || '').trim().toLowerCase() === manager.trim().toLowerCase() && r[3] === date) {
-      data.push({ range: `StockStatus!H${i + 2}`, values: [['EDITED']] });
+      data.push({ range: `StockStatus!I${i + 2}`, values: [['EDITED']] });
     }
   });
   if (data.length) await sheetsBatchUpdateValues(data);
@@ -705,12 +705,13 @@ app.post('/api/stock-submit', async (req, res) => {
     }
     for (const e of entries) {
       if (!STOCK_CATEGORIES.includes(e.category)) return res.json({ ok:false, error:'Invalid category: ' + e.category });
-      if (!STOCK_STATUSES.includes(e.status)) return res.json({ ok:false, error:'Invalid status for ' + e.category });
+      if (!STOCK_STATUSES.includes(e.status)) return res.json({ ok:false, error:'Invalid status for ' + e.category + '/' + (e.store||'') });
+      if (!e.store) return res.json({ ok:false, error:'Store required for ' + e.category });
     }
     const ts = new Date().toISOString();
     const id = 'K' + Date.now();
-    const rows = entries.map((e) => [ts, id, manager, date, e.category, e.status, e.remarks || '', 'ACTIVE']);
-    await sheetsAppend('StockStatus!A1:H1', rows);
+    const rows = entries.map((e) => [ts, id, manager, date, e.store, e.category, e.status, e.remarks || '', 'ACTIVE']);
+    await sheetsAppend('StockStatus!A1:I1', rows);
     try { await markStockEdited(manager, date, id); } catch(_){}
     res.json({ ok: true, reportId: id });
   } catch (e) {
@@ -723,18 +724,17 @@ app.get('/api/stock-latest', async (req, res) => {
     const manager = (req.query.manager || '').trim().toLowerCase();
     const date = (req.query.date || '').trim();
     if (!manager || !date) return res.json({ ok: false, error: 'manager and date required' });
-    const rows = await sheetsGet('StockStatus!A2:H');
+    const rows = await sheetsGet('StockStatus!A2:I');
     const filtered = rows.filter(r =>
-      (r[7]||'ACTIVE') === 'ACTIVE'
+      (r[8]||'ACTIVE') === 'ACTIVE'
       && (r[2]||'').trim().toLowerCase() === manager
       && r[3] === date
     );
     if (!filtered.length) return res.json({ ok:true, entries: [] });
-    // Only need latest ReportID (there should be one after markEdited)
     const latestId = filtered.reduce((max,r) => r[1] > max ? r[1] : max, '');
     const latest = filtered.filter(r => r[1] === latestId);
     res.json({ ok:true, reportId: latestId, date, timestamp: latest[0][0],
-      entries: latest.map(r => ({ category: r[4], status: r[5], remarks: r[6] })) });
+      entries: latest.map(r => ({ store: r[4], category: r[5], status: r[6], remarks: r[7] })) });
   } catch(e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -746,12 +746,12 @@ app.get('/api/stock-monitor', async (req, res) => {
     const to = (req.query.to || '').trim();
     const isRegional = level === 'regional manager';
 
-    const rows = await sheetsGet('StockStatus!A2:H');
+    const rows = await sheetsGet('StockStatus!A2:I');
     const amRows = await sheetsGet('AreaManagers!A2:C');
     const allAMs = amRows.filter(r => (r[2] || '').trim().toLowerCase() === 'area manager').map(r => r[0]);
 
     const filtered = rows.filter(r => {
-      if ((r[7] || 'ACTIVE') !== 'ACTIVE') return false;
+      if ((r[8] || 'ACTIVE') !== 'ACTIVE') return false;
       if (from && (r[3] || '') < from) return false;
       if (to && (r[3] || '') > to) return false;
       if (!isRegional && (r[2] || '').trim().toLowerCase() !== manager) return false;
@@ -765,13 +765,17 @@ app.get('/api/stock-monitor', async (req, res) => {
       if (!map[k] || r[1] > map[k].id) map[k] = { id: r[1], rows: [] };
       if (r[1] === map[k].id) map[k].rows.push(r);
     });
-    // Second pass to collect only rows with matching id (in case order was odd)
     const reports = [];
     Object.entries(map).forEach(([k, obj]) => {
       const [am, date] = k.split('||');
       const rowsForId = filtered.filter(r => r[2] === am && r[3] === date && r[1] === obj.id);
+      // Grouped: categories[cat] = [{ store, status, remarks }, ...]
       const catMap = {};
-      rowsForId.forEach(r => { catMap[r[4]] = { status: r[5], remarks: r[6] }; });
+      rowsForId.forEach(r => {
+        const cat = r[5];
+        if (!catMap[cat]) catMap[cat] = [];
+        catMap[cat].push({ store: r[4] || '(all stores)', status: r[6], remarks: r[7] });
+      });
       const timestamp = rowsForId[0][0];
       const submitted = new Date(timestamp);
       const phHour = (submitted.getUTCHours() + 8) % 24;
@@ -793,16 +797,17 @@ app.get('/api/stock-monitor', async (req, res) => {
     const onTimeToday = todayReports.filter(r => r.onTime).length;
 
     let oosCount = 0, critCount = 0, healthyCount = 0;
-    todayReports.forEach(r => Object.values(r.categories).forEach(c => {
+    todayReports.forEach(r => Object.values(r.categories).forEach(arr => arr.forEach(c => {
       if (c.status === 'OOS') oosCount++;
       else if (c.status === 'Critical') critCount++;
       else if (c.status === 'Healthy') healthyCount++;
-    }));
+    })));
 
     const catBreakdown = {};
     STOCK_CATEGORIES.forEach(c => catBreakdown[c] = { OOS: 0, Critical: 0, Healthy: 0 });
-    todayReports.forEach(r => Object.entries(r.categories).forEach(([cat, c]) => {
-      if (catBreakdown[cat] && catBreakdown[cat][c.status] !== undefined) catBreakdown[cat][c.status]++;
+    todayReports.forEach(r => Object.entries(r.categories).forEach(([cat, arr]) => {
+      if (!catBreakdown[cat]) return;
+      arr.forEach(c => { if (catBreakdown[cat][c.status] !== undefined) catBreakdown[cat][c.status]++; });
     }));
 
     // Suppress "missing today" if today is before rollout
@@ -840,6 +845,19 @@ app.get('/api/stock-monitor', async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+app.get('/api/am-stores', async (req, res) => {
+  try {
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    if (!manager) return res.json({ ok:false, error:'manager required' });
+    const rows = await sheetsGet('ListOfStores!A2:G');
+    const stores = rows
+      .filter(r => (r[6] || '').trim().toLowerCase() === manager)
+      .map(r => r[4])
+      .filter(Boolean);
+    res.json({ ok: true, stores });
+  } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
@@ -2049,7 +2067,7 @@ const STOCK_OPTS = [
   { v: 'Critical', lbl: 'Critical', bg: '#e0a020', fg: '#fff' },
   { v: 'Healthy',  lbl: 'Healthy',  bg: '#1f7a3a', fg: '#fff' },
 ];
-let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null };
+let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null, amStores: [] };
 
 async function loadStockTab(){
   const level = (S.level||'').toLowerCase();
@@ -2059,10 +2077,12 @@ async function loadStockTab(){
   const today = todayStr();
   if (!STOCK_STATE.from) STOCK_STATE.from = todayStr(-29);
   if (!STOCK_STATE.to)   STOCK_STATE.to   = today;
-  const [monRes, latestRes] = await Promise.all([
+  const [monRes, latestRes, storesRes] = await Promise.all([
     api('/api/stock-monitor?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + '&from=' + STOCK_STATE.from + '&to=' + STOCK_STATE.to),
-    isAM ? api('/api/stock-latest?manager=' + encodeURIComponent(S.manager) + '&date=' + today) : Promise.resolve({ ok:true, entries: [] })
+    isAM ? api('/api/stock-latest?manager=' + encodeURIComponent(S.manager) + '&date=' + today) : Promise.resolve({ ok:true, entries: [] }),
+    isAM ? api('/api/am-stores?manager=' + encodeURIComponent(S.manager)) : Promise.resolve({ ok:true, stores: [] })
   ]);
+  STOCK_STATE.amStores = (storesRes.stores || []);
   if (!monRes.ok){ $('#stockOut').innerHTML = '<div class="card err">'+escapeHtml(monRes.error||'Failed')+'</div>'; return; }
   STOCK_STATE.lastData = monRes;
   const k = monRes.kpis;
@@ -2123,45 +2143,75 @@ async function loadStockTab(){
   // AM Submission Form (only for AM)
   let formCard = '';
   if (isAM) {
+    const stores = STOCK_STATE.amStores;
     // Preload existing submission if any
-    const existing = {};
-    (latestRes.entries || []).forEach(e => { existing[e.category] = { status: e.status, remarks: e.remarks || '' }; });
+    const existing = {}; // { category: { store: {status, remarks} } }
+    (latestRes.entries || []).forEach(e => {
+      if (!existing[e.category]) existing[e.category] = {};
+      existing[e.category][e.store] = { status: e.status, remarks: e.remarks || '' };
+    });
     STOCK_STATE.entries = {};
-    STOCK_CATS.forEach(c => STOCK_STATE.entries[c.name] = existing[c.name] || { status: '', remarks: '' });
+    STOCK_CATS.forEach(c => {
+      STOCK_STATE.entries[c.name] = {};
+      stores.forEach(s => {
+        STOCK_STATE.entries[c.name][s] = (existing[c.name] && existing[c.name][s]) || { status: '', remarks: '' };
+      });
+    });
     const hasExisting = (latestRes.entries || []).length > 0;
+    const noStoresMsg = !stores.length ? '<div style="padding:12px;background:#fee;color:#c33;border-radius:6px;font-size:13px">No stores assigned to your account. Contact admin to update ListOfStores column G.</div>' : '';
     formCard = \`<div class="card">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px">
         <h3 style="margin:0;color:#1f7a3a">\${hasExisting?'Update':'Submit'} Stock Status Report</h3>
         <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${today}</span>
+        <span style="background:#eef;color:#334;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">\${stores.length} store\${stores.length===1?'':'s'}</span>
         \${hasExisting?'<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>':''}
       </div>
       <div style="margin-bottom:12px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
         <b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Late submissions count against your compliance.
       </div>
-      <div id="stockForm">\${STOCK_CATS.map(c => stockRowHTML(c)).join('')}</div>
-      <div style="margin-top:12px"><button id="stockSubmitBtn">\${hasExisting?'Update Report':'Submit Report'}</button></div>
+      \${noStoresMsg}
+      <div id="stockForm">\${stores.length ? STOCK_CATS.map(c => stockCategoryHTML(c, stores)).join('') : ''}</div>
+      \${stores.length ? '<div style="margin-top:12px"><button id="stockSubmitBtn">'+(hasExisting?'Update Report':'Submit Report')+'</button></div>' : ''}
       <div id="stockErr" class="err"></div>
     </div>\`;
   }
 
   // Reports table (RM sees all, AM sees their own history)
+  const worstOf = (arr) => {
+    if (arr.some(x => x.status === 'OOS')) return 'OOS';
+    if (arr.some(x => x.status === 'Critical')) return 'Critical';
+    if (arr.some(x => x.status === 'Healthy')) return 'Healthy';
+    return '';
+  };
   const reportsHtml = monRes.reports.length ? monRes.reports.slice(0,100).map(r => {
     const cats = STOCK_CATS.map(c => {
-      const cat = r.categories[c.name];
-      if (!cat) return \`<td style="padding:4px;text-align:center;background:#f7f7f7;color:#bbb">-</td>\`;
-      const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789', fg:'#fff' };
-      return \`<td style="padding:4px;text-align:center;background:\${opt.bg};color:\${opt.fg};font-weight:700;font-size:11px">\${cat.status}</td>\`;
+      const arr = r.categories[c.name] || [];
+      if (!arr.length) return \`<td style="padding:4px;text-align:center;background:#f7f7f7;color:#bbb">-</td>\`;
+      const worst = worstOf(arr);
+      const opt = STOCK_OPTS.find(o => o.v === worst) || { bg:'#789', fg:'#fff' };
+      const countAtWorst = arr.filter(x => x.status === worst).length;
+      const totalStores = arr.length;
+      return \`<td style="padding:4px;text-align:center;background:\${opt.bg};color:\${opt.fg};font-weight:700;font-size:11px">\${worst}<br><span style="font-size:9px;opacity:.9">\${countAtWorst}/\${totalStores}</span></td>\`;
     }).join('');
     const badge = r.onTime ? '<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>' : '<span class="pill" style="background:#c33;font-size:10px">LATE</span>';
+    // Per-category × per-store breakdown in expansion
     const remarkPanels = STOCK_CATS.map(c => {
-      const cat = r.categories[c.name];
-      if (!cat || !cat.remarks) return '';
-      const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789' };
-      return \`<div style="padding:6px 10px;background:#f8fafb;border-left:3px solid \${opt.bg};margin:4px 0;font-size:12px;border-radius:0 4px 4px 0">
-        <b style="color:#1f7a3a">\${c.icon} \${c.name}</b> <span style="color:#\${opt.bg.slice(1)};font-weight:700;font-size:11px">[\${cat.status}]</span>: \${escapeHtml(cat.remarks)}
+      const arr = r.categories[c.name] || [];
+      if (!arr.length) return '';
+      const rows = arr.map(e => {
+        const opt = STOCK_OPTS.find(o => o.v === e.status) || { bg:'#789', fg:'#fff' };
+        return \`<div style="display:flex;gap:8px;padding:4px 0;font-size:12px;align-items:baseline">
+          <span style="min-width:130px;font-weight:600;color:#334">\${escapeHtml(e.store)}</span>
+          <span style="background:\${opt.bg};color:\${opt.fg};padding:2px 8px;border-radius:6px;font-weight:700;font-size:11px">\${e.status}</span>
+          <span style="color:#456;flex:1">\${escapeHtml(e.remarks||'')}</span>
+        </div>\`;
+      }).join('');
+      return \`<div style="margin-bottom:8px">
+        <div style="font-weight:700;color:#1f7a3a;font-size:13px;margin-bottom:2px">\${c.icon} \${c.name}</div>
+        \${rows}
       </div>\`;
     }).join('');
-    const remarkContent = remarkPanels || '<div style="color:#789;padding:6px;font-size:12px;font-style:italic">No remarks provided</div>';
+    const remarkContent = remarkPanels || '<div style="color:#789;padding:6px;font-size:12px;font-style:italic">No detail</div>';
     return \`<tr onclick="toggleReportRemarks('\${r.reportId}')" style="cursor:pointer" onmouseover="this.style.background='#f4faf6'" onmouseout="this.style.background=''">
       <td style="padding:4px 8px;font-weight:600;font-size:12px">\${escapeHtml(r.manager)}</td>
       <td style="padding:4px 8px;font-size:12px">\${escapeHtml(r.date)}</td>
@@ -2205,10 +2255,12 @@ async function loadStockTab(){
       const expanded = STOCK_STATE.expanded[am];
       const rowsHtml = expanded ? (list.length ? list.slice(0,60).map(r => {
         const cats = STOCK_CATS.map(c => {
-          const cat = r.categories[c.name];
-          if (!cat) return '<td style="padding:3px;text-align:center;background:#f7f7f7;color:#bbb;font-size:11px">-</td>';
-          const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789', fg:'#fff' };
-          return '<td style="padding:3px;text-align:center;background:'+opt.bg+';color:'+opt.fg+';font-weight:700;font-size:11px" title="'+escapeHtml(cat.remarks||'')+'">'+cat.status+'</td>';
+          const arr = r.categories[c.name] || [];
+          if (!arr.length) return '<td style="padding:3px;text-align:center;background:#f7f7f7;color:#bbb;font-size:11px">-</td>';
+          const worst = (arr.some(x=>x.status==='OOS')?'OOS':arr.some(x=>x.status==='Critical')?'Critical':'Healthy');
+          const opt = STOCK_OPTS.find(o => o.v === worst) || { bg:'#789', fg:'#fff' };
+          const tip = arr.map(e => e.store + ': ' + e.status + (e.remarks?' - '+e.remarks:'')).join('\\n');
+          return '<td style="padding:3px;text-align:center;background:'+opt.bg+';color:'+opt.fg+';font-weight:700;font-size:11px" title="'+escapeHtml(tip)+'">'+worst+'</td>';
         }).join('');
         const badge = r.onTime ? '<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>' : '<span class="pill" style="background:#c33;font-size:10px">LATE</span>';
         return \`<tr>
@@ -2260,39 +2312,48 @@ async function loadStockTab(){
   $('#stockExportBtn').onclick = exportStockExcel;
 
   // Wire up form buttons
-  if (isAM) {
+  if (isAM && STOCK_STATE.amStores.length) {
     document.querySelectorAll('[data-stockcat]').forEach(btn => btn.onclick = () => {
-      const cat = btn.dataset.stockcat, val = btn.dataset.stockval;
-      STOCK_STATE.entries[cat].status = val;
+      const cat = btn.dataset.stockcat, store = btn.dataset.stockstore, val = btn.dataset.stockval;
+      if (!STOCK_STATE.entries[cat][store]) STOCK_STATE.entries[cat][store] = { status:'', remarks:'' };
+      STOCK_STATE.entries[cat][store].status = val;
       renderStockForm();
     });
     document.querySelectorAll('[data-stockremarks]').forEach(ta => ta.oninput = () => {
-      STOCK_STATE.entries[ta.dataset.stockremarks].remarks = ta.value;
+      const cat = ta.dataset.stockremarks, store = ta.dataset.storeremarks;
+      if (!STOCK_STATE.entries[cat][store]) STOCK_STATE.entries[cat][store] = { status:'', remarks:'' };
+      STOCK_STATE.entries[cat][store].remarks = ta.value;
     });
-    $('#stockSubmitBtn').onclick = submitStock;
+    const sb = $('#stockSubmitBtn'); if (sb) sb.onclick = submitStock;
   }
 }
 
-function stockRowHTML(c){
-  const st = STOCK_STATE.entries[c.name] || { status:'', remarks:'' };
-  const btns = STOCK_OPTS.map(o => {
-    const on = st.status === o.v;
-    return \`<button type="button" data-stockcat="\${c.name}" data-stockval="\${o.v}" style="flex:1;background:\${on?o.bg:'#eef'};color:\${on?o.fg:'#334'};border:0;border-radius:8px;padding:10px;font-weight:700;cursor:pointer;font-size:13px">\${o.lbl}</button>\`;
+function stockCategoryHTML(c, stores){
+  const storeRows = stores.map(store => {
+    const st = (STOCK_STATE.entries[c.name] && STOCK_STATE.entries[c.name][store]) || { status:'', remarks:'' };
+    const btns = STOCK_OPTS.map(o => {
+      const on = st.status === o.v;
+      return \`<button type="button" data-stockcat="\${c.name}" data-stockstore="\${escapeHtml(store)}" data-stockval="\${o.v}" style="flex:1;background:\${on?o.bg:'#eef'};color:\${on?o.fg:'#334'};border:0;border-radius:6px;padding:8px 4px;font-weight:700;cursor:pointer;font-size:12px;min-width:70px">\${o.lbl}</button>\`;
+    }).join('');
+    return \`<div style="padding:10px 0;border-bottom:1px dashed #eee">
+      <div style="font-weight:600;color:#334;font-size:13px;margin-bottom:6px">\${escapeHtml(store)}</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">\${btns}</div>
+      <textarea data-stockremarks="\${c.name}" data-storeremarks="\${escapeHtml(store)}" placeholder="Remarks (optional)" style="min-height:36px;font-size:13px">\${escapeHtml(st.remarks||'')}</textarea>
+    </div>\`;
   }).join('');
-  return \`<div style="padding:12px 0;border-bottom:1px solid #eee">
+  return \`<div style="padding:12px 0;border-bottom:2px solid #1f7a3a;margin-bottom:6px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <div style="font-size:22px">\${c.icon}</div>
-      <div style="font-weight:700;font-size:15px;color:#1f7a3a">\${c.name}</div>
+      <div style="font-size:26px">\${c.icon}</div>
+      <div style="font-weight:800;font-size:17px;color:#1f7a3a">\${c.name}</div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px">\${btns}</div>
-    <textarea data-stockremarks="\${c.name}" placeholder="Remarks / brief explanation (optional)" style="min-height:44px">\${escapeHtml(st.remarks||'')}</textarea>
+    <div style="padding-left:6px">\${storeRows}</div>
   </div>\`;
 }
 
 function renderStockForm(){
   document.querySelectorAll('[data-stockcat]').forEach(btn => {
-    const cat = btn.dataset.stockcat, val = btn.dataset.stockval;
-    const on = STOCK_STATE.entries[cat].status === val;
+    const cat = btn.dataset.stockcat, store = btn.dataset.stockstore, val = btn.dataset.stockval;
+    const on = STOCK_STATE.entries[cat][store] && STOCK_STATE.entries[cat][store].status === val;
     const opt = STOCK_OPTS.find(o => o.v === val);
     btn.style.background = on ? opt.bg : '#eef';
     btn.style.color      = on ? opt.fg : '#334';
@@ -2343,25 +2404,34 @@ function exportStockExcel(){
     </tr>\`;
   }).join('');
 
-  const reportRows = data.reports.slice(0, 500).map(r => {
-    const cats = STOCK_CATS.map(c => {
-      const cat = r.categories[c.name];
-      if (!cat) return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;color:#bbb">-</td>';
-      return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;background:'+statusColor(cat.status)+';color:#fff;font-weight:bold">'+cat.status+'</td>';
-    }).join('');
-    const remarks = STOCK_CATS.map(c => {
-      const cat = r.categories[c.name];
-      return '<td style="border:1px solid #b0b0b0;padding:5px;font-size:11px">'+escapeHtml((cat&&cat.remarks)||'')+'</td>';
-    }).join('');
+  // One row per (report × store) so Excel shows the per-store detail flat
+  const reportRows = data.reports.slice(0, 500).flatMap(r => {
     const badge = r.onTime ? '<span style="background:#1f7a3a;color:#fff;padding:2px 8px;border-radius:8px;font-weight:bold;font-size:11px">ON TIME</span>' : '<span style="background:#c33;color:#fff;padding:2px 8px;border-radius:8px;font-weight:bold;font-size:11px">LATE</span>';
-    return \`<tr>
-      <td style="border:1px solid #b0b0b0;padding:5px 8px;font-weight:bold">\${escapeHtml(r.manager)}</td>
-      <td style="border:1px solid #b0b0b0;padding:5px 8px">\${escapeHtml(r.date)}</td>
-      <td style="border:1px solid #b0b0b0;padding:5px;text-align:center">\${badge}</td>
-      \${cats}
-      \${remarks}
-      <td style="border:1px solid #b0b0b0;padding:5px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
-    </tr>\`;
+    // Collect the set of all stores present in this report across categories
+    const storeSet = new Set();
+    STOCK_CATS.forEach(c => (r.categories[c.name]||[]).forEach(e => storeSet.add(e.store)));
+    const stores = [...storeSet];
+    if (!stores.length) return [];
+    return stores.map((store, idx) => {
+      const cats = STOCK_CATS.map(c => {
+        const e = (r.categories[c.name]||[]).find(x => x.store === store);
+        if (!e) return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;color:#bbb">-</td>';
+        return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;background:'+statusColor(e.status)+';color:#fff;font-weight:bold">'+e.status+'</td>';
+      }).join('');
+      const remarks = STOCK_CATS.map(c => {
+        const e = (r.categories[c.name]||[]).find(x => x.store === store);
+        return '<td style="border:1px solid #b0b0b0;padding:5px;font-size:11px">'+escapeHtml((e&&e.remarks)||'')+'</td>';
+      }).join('');
+      return \`<tr>
+        <td style="border:1px solid #b0b0b0;padding:5px 8px;font-weight:bold">\${idx===0?escapeHtml(r.manager):''}</td>
+        <td style="border:1px solid #b0b0b0;padding:5px 8px">\${idx===0?escapeHtml(r.date):''}</td>
+        <td style="border:1px solid #b0b0b0;padding:5px 8px;font-weight:600">\${escapeHtml(store)}</td>
+        <td style="border:1px solid #b0b0b0;padding:5px;text-align:center">\${idx===0?badge:''}</td>
+        \${cats}
+        \${remarks}
+        <td style="border:1px solid #b0b0b0;padding:5px 8px;font-size:11px;color:#789">\${idx===0?new Date(r.timestamp).toLocaleString():''}</td>
+      </tr>\`;
+    });
   }).join('');
 
   const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
@@ -2378,7 +2448,7 @@ function exportStockExcel(){
   </table>
   <h2 style="color:#1f7a3a">All Reports</h2>
   <table style="border-collapse:collapse;font-size:11px">
-    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Area Manager</th><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Date</th><th style="border:1px solid #b0b0b0;padding:6px">Status</th>\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+'</th>').join('')}\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+' Remarks</th>').join('')}<th style="border:1px solid #b0b0b0;padding:6px 8px">Submitted At</th></tr></thead>
+    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Area Manager</th><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Date</th><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Store</th><th style="border:1px solid #b0b0b0;padding:6px">Status</th>\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+'</th>').join('')}\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+' Remarks</th>').join('')}<th style="border:1px solid #b0b0b0;padding:6px 8px">Submitted At</th></tr></thead>
     <tbody>\${reportRows}</tbody>
   </table>
 </body></html>\`;
@@ -2393,9 +2463,16 @@ function exportStockExcel(){
 
 async function submitStock(){
   $('#stockErr').textContent = '';
-  const entries = STOCK_CATS.map(c => ({ category: c.name, status: STOCK_STATE.entries[c.name].status, remarks: STOCK_STATE.entries[c.name].remarks }));
-  const missing = entries.filter(e => !e.status).map(e => e.category);
-  if (missing.length) { $('#stockErr').textContent = 'Please select a status for: ' + missing.join(', '); return; }
+  const entries = [];
+  const missing = [];
+  STOCK_CATS.forEach(c => {
+    STOCK_STATE.amStores.forEach(store => {
+      const st = (STOCK_STATE.entries[c.name] && STOCK_STATE.entries[c.name][store]) || { status:'', remarks:'' };
+      if (!st.status) missing.push(c.name + ' / ' + store);
+      entries.push({ category: c.name, store, status: st.status, remarks: st.remarks });
+    });
+  });
+  if (missing.length) { $('#stockErr').textContent = 'Please select a status for: ' + missing.slice(0,5).join(', ') + (missing.length>5?' and '+(missing.length-5)+' more':''); return; }
   const btn = $('#stockSubmitBtn'); btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Submitting...';
   const r = await api('/api/stock-submit', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ manager: S.manager, date: todayStr(), entries }) });

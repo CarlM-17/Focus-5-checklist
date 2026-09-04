@@ -680,6 +680,9 @@ app.get('/api/store-checks-monitor', async (req, res) => {
 // ---------- Focus 5 Stock Status ----------
 const STOCK_CATEGORIES = ['Rice','Eggs','Poultry','Meat','Sugar'];
 const STOCK_STATUSES   = ['OOS','Critical','Healthy'];
+// Days BEFORE this date are ignored by streak, on-time/late/missed counts, and KPIs.
+// Change this value to reset the rollout, or set to '' to disable.
+const STOCK_ROLLOUT = process.env.STOCK_ROLLOUT || '2026-09-05';
 
 async function markStockEdited(manager, date, newId) {
   const rows = await sheetsGet('StockStatus!A2:H');
@@ -802,20 +805,25 @@ app.get('/api/stock-monitor', async (req, res) => {
       if (catBreakdown[cat] && catBreakdown[cat][c.status] !== undefined) catBreakdown[cat][c.status]++;
     }));
 
-    const missingAMs = scopeAMs.filter(am => !submittedTodayAMs.has(am));
+    // Suppress "missing today" if today is before rollout
+    const missingAMs = (STOCK_ROLLOUT && todayPH < STOCK_ROLLOUT)
+      ? []
+      : scopeAMs.filter(am => !submittedTodayAMs.has(am));
 
     // Per-AM streaks: consecutive days going back from yesterday where the AM was Late OR Missed.
     // Uses all reports in the filtered range (bounded by from/to).
     const reportsByAMDate = {};
     reports.forEach(r => { reportsByAMDate[r.manager + '||' + r.date] = r; });
     const yesterdayPH = new Date(nowPH.getTime() - 86400*1000).toISOString().slice(0,10);
-    const rangeStart = from || todayPH; // don't count beyond query range
+    // Effective start = later of (query from) and (rollout date). Days before rollout are ignored entirely.
+    const effectiveStart = STOCK_ROLLOUT && (from || todayPH) < STOCK_ROLLOUT
+      ? STOCK_ROLLOUT
+      : (from || todayPH);
     const amStats = {};
     scopeAMs.forEach(am => {
       let streak = 0, onTimeDays = 0, lateDays = 0, missedDays = 0;
-      // Walk backwards from yesterday day-by-day; stop when leaving the from/to range
       const cursor = new Date(yesterdayPH + 'T00:00:00');
-      const stopAt = new Date(rangeStart + 'T00:00:00');
+      const stopAt = new Date(effectiveStart + 'T00:00:00');
       let streakLive = true;
       while (cursor >= stopAt) {
         const dStr = cursor.getFullYear() + '-' + String(cursor.getMonth()+1).padStart(2,'0') + '-' + String(cursor.getDate()).padStart(2,'0');

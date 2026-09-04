@@ -677,6 +677,138 @@ app.get('/api/store-checks-monitor', async (req, res) => {
   }
 });
 
+// ---------- Focus 5 Stock Status ----------
+const STOCK_CATEGORIES = ['Rice','Eggs','Poultry','Meat','Sugar'];
+const STOCK_STATUSES   = ['OOS','Critical','Healthy'];
+
+async function markStockEdited(manager, date) {
+  const rows = await sheetsGet('StockStatus!A2:H');
+  const data = [];
+  rows.forEach((r, i) => {
+    if ((r[7] || 'ACTIVE') !== 'ACTIVE') return;
+    if ((r[2] || '').trim().toLowerCase() === manager.trim().toLowerCase() && r[3] === date) {
+      data.push({ range: `StockStatus!H${i + 2}`, values: [['EDITED']] });
+    }
+  });
+  if (data.length) await sheetsBatchUpdateValues(data);
+}
+
+app.post('/api/stock-submit', async (req, res) => {
+  try {
+    const { manager, date, entries } = req.body || {};
+    if (!manager || !date || !Array.isArray(entries) || !entries.length) {
+      return res.json({ ok: false, error: 'Missing fields' });
+    }
+    for (const e of entries) {
+      if (!STOCK_CATEGORIES.includes(e.category)) return res.json({ ok:false, error:'Invalid category: ' + e.category });
+      if (!STOCK_STATUSES.includes(e.status)) return res.json({ ok:false, error:'Invalid status for ' + e.category });
+    }
+    const ts = new Date().toISOString();
+    const id = 'K' + Date.now();
+    const rows = entries.map((e) => [ts, id, manager, date, e.category, e.status, e.remarks || '', 'ACTIVE']);
+    await sheetsAppend('StockStatus!A1:H1', rows);
+    try { await markStockEdited(manager, date); } catch(_){}
+    res.json({ ok: true, reportId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/stock-latest', async (req, res) => {
+  try {
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    const date = (req.query.date || '').trim();
+    if (!manager || !date) return res.json({ ok: false, error: 'manager and date required' });
+    const rows = await sheetsGet('StockStatus!A2:H');
+    const filtered = rows.filter(r =>
+      (r[7]||'ACTIVE') === 'ACTIVE'
+      && (r[2]||'').trim().toLowerCase() === manager
+      && r[3] === date
+    );
+    if (!filtered.length) return res.json({ ok:true, entries: [] });
+    // Only need latest ReportID (there should be one after markEdited)
+    const latestId = filtered.reduce((max,r) => r[1] > max ? r[1] : max, '');
+    const latest = filtered.filter(r => r[1] === latestId);
+    res.json({ ok:true, reportId: latestId, date, timestamp: latest[0][0],
+      entries: latest.map(r => ({ category: r[4], status: r[5], remarks: r[6] })) });
+  } catch(e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/stock-monitor', async (req, res) => {
+  try {
+    const level = (req.query.level || '').trim().toLowerCase();
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const isRegional = level === 'regional manager';
+
+    const rows = await sheetsGet('StockStatus!A2:H');
+    const amRows = await sheetsGet('AreaManagers!A2:C');
+    const allAMs = amRows.filter(r => (r[2] || '').trim().toLowerCase() === 'area manager').map(r => r[0]);
+
+    const filtered = rows.filter(r => {
+      if ((r[7] || 'ACTIVE') !== 'ACTIVE') return false;
+      if (from && (r[3] || '') < from) return false;
+      if (to && (r[3] || '') > to) return false;
+      if (!isRegional && (r[2] || '').trim().toLowerCase() !== manager) return false;
+      return true;
+    });
+
+    // Latest ReportID per (AM, date)
+    const map = {};
+    filtered.forEach(r => {
+      const k = r[2] + '||' + r[3];
+      if (!map[k] || r[1] > map[k].id) map[k] = { id: r[1], rows: [] };
+      if (r[1] === map[k].id) map[k].rows.push(r);
+    });
+    // Second pass to collect only rows with matching id (in case order was odd)
+    const reports = [];
+    Object.entries(map).forEach(([k, obj]) => {
+      const [am, date] = k.split('||');
+      const rowsForId = filtered.filter(r => r[2] === am && r[3] === date && r[1] === obj.id);
+      const catMap = {};
+      rowsForId.forEach(r => { catMap[r[4]] = { status: r[5], remarks: r[6] }; });
+      const timestamp = rowsForId[0][0];
+      const submitted = new Date(timestamp);
+      const phHour = (submitted.getUTCHours() + 8) % 24;
+      const submittedDatePH = new Date(submitted.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const onTime = (submittedDatePH < date) || (submittedDatePH === date && phHour < 9);
+      reports.push({ manager: am, date, reportId: obj.id, timestamp, categories: catMap, onTime });
+    });
+    reports.sort((a,b) => b.date.localeCompare(a.date) || a.manager.localeCompare(b.manager));
+
+    // Today (PH)
+    const nowPH = new Date(Date.now() + 8*3600*1000);
+    const todayPH = nowPH.toISOString().slice(0,10);
+    const todayReports = reports.filter(r => r.date === todayPH);
+    const submittedTodayAMs = new Set(todayReports.map(r => r.manager));
+    const scopeAMs = isRegional ? allAMs : [manager];
+    const totalAMs = scopeAMs.length;
+    const submittedToday = submittedTodayAMs.size;
+    const complianceRate = totalAMs ? Math.round((submittedToday / totalAMs) * 100) : 0;
+    const onTimeToday = todayReports.filter(r => r.onTime).length;
+
+    let oosCount = 0, critCount = 0, healthyCount = 0;
+    todayReports.forEach(r => Object.values(r.categories).forEach(c => {
+      if (c.status === 'OOS') oosCount++;
+      else if (c.status === 'Critical') critCount++;
+      else if (c.status === 'Healthy') healthyCount++;
+    }));
+
+    const catBreakdown = {};
+    STOCK_CATEGORIES.forEach(c => catBreakdown[c] = { OOS: 0, Critical: 0, Healthy: 0 });
+    todayReports.forEach(r => Object.entries(r.categories).forEach(([cat, c]) => {
+      if (catBreakdown[cat] && catBreakdown[cat][c.status] !== undefined) catBreakdown[cat][c.status]++;
+    }));
+
+    const missingAMs = scopeAMs.filter(am => !submittedTodayAMs.has(am));
+
+    res.json({ ok: true, reports, kpis: { complianceRate, submittedToday, totalAMs, oosCount, critCount, healthyCount, onTimeToday }, catBreakdown, missingAMs, todayPH });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---------- Frontend ----------
@@ -762,6 +894,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <button data-tab="hist">AM Check History</button>
     <button data-tab="sum">AM Check Summary</button>
     <button data-tab="mon">Store Checks</button>
+    <button data-tab="stock">Focus 5 Stock Status</button>
     <button data-tab="scheck">Store Check</button>
   </div>
 
@@ -834,6 +967,10 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
       <div id="monMeta" class="muted" style="margin-top:8px"></div>
     </div>
     <div id="monOut"></div>
+  </div>
+
+  <div id="tabStock" class="hidden">
+    <div id="stockOut"><div class="card muted">Loading...</div></div>
   </div>
 
   <div id="tabSCheck" class="hidden">
@@ -971,6 +1108,7 @@ function applyRoleUI(){
   show('.tabs button[data-tab="hist"]', true);
   show('.tabs button[data-tab="sum"]',  true);
   show('.tabs button[data-tab="mon"]',  !isStoreMgr);
+  show('.tabs button[data-tab="stock"]', !isStoreMgr);
   show('.tabs button[data-tab="scheck"]', isStoreMgr);
 }
 
@@ -1111,6 +1249,8 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabSum').classList.toggle('hidden', t!=='sum');
   $('#tabMon').classList.toggle('hidden', t!=='mon');
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
+  $('#tabStock').classList.toggle('hidden', t!=='stock');
+  if (t==='stock') loadStockTab();
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
   if (t==='mon') { if(!$('#monFrom').value){ $('#monFrom').value = todayStr(-14); $('#monTo').value = todayStr(); } loadMonitor(); }
@@ -1862,6 +2002,193 @@ $('#monExport').onclick = () => {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
+// ---- Focus 5 Stock Status ----
+const STOCK_CATS = [
+  { name: 'Rice',    icon: '&#127834;' },
+  { name: 'Eggs',    icon: '&#129370;' },
+  { name: 'Poultry', icon: '&#128020;' },
+  { name: 'Meat',    icon: '&#129385;' },
+  { name: 'Sugar',   icon: '&#129474;' },
+];
+const STOCK_OPTS = [
+  { v: 'OOS',      lbl: 'OOS',      bg: '#c33',    fg: '#fff' },
+  { v: 'Critical', lbl: 'Critical', bg: '#e0a020', fg: '#fff' },
+  { v: 'Healthy',  lbl: 'Healthy',  bg: '#1f7a3a', fg: '#fff' },
+];
+let STOCK_STATE = { entries: {} }; // { Rice: {status,remarks}, ... }
+
+async function loadStockTab(){
+  const level = (S.level||'').toLowerCase();
+  const isAM = level === 'area manager';
+  const isRM = level === 'regional manager';
+  $('#stockOut').innerHTML = '<div class="card muted">Loading...</div>';
+  const today = todayStr();
+  const [monRes, latestRes] = await Promise.all([
+    api('/api/stock-monitor?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + '&from=' + today + '&to=' + today),
+    isAM ? api('/api/stock-latest?manager=' + encodeURIComponent(S.manager) + '&date=' + today) : Promise.resolve({ ok:true, entries: [] })
+  ]);
+  if (!monRes.ok){ $('#stockOut').innerHTML = '<div class="card err">'+escapeHtml(monRes.error||'Failed')+'</div>'; return; }
+  const k = monRes.kpis;
+
+  // KPI cards row
+  const kpi = (icon, num, lbl, bg, sub) => \`<div style="flex:1 1 140px;min-width:0;background:\${bg};color:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
+    <div style="font-size:20px;opacity:.9;line-height:1">\${icon}</div>
+    <div style="font-size:28px;font-weight:800;margin-top:6px;line-height:1">\${num}</div>
+    <div style="font-size:12px;opacity:.95;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px">\${lbl}</div>
+    \${sub ? '<div style="font-size:11px;opacity:.85;margin-top:2px">'+sub+'</div>' : ''}
+  </div>\`;
+  const complianceCard = kpi('&#128202;', k.complianceRate + '%', 'Compliance', k.complianceRate>=100?'#1f7a3a':k.complianceRate>=50?'#e0a020':'#c33', k.submittedToday + ' of ' + k.totalAMs + ' AM(s) today');
+  const oosCard      = kpi('&#128308;', k.oosCount,      'OOS today',     '#c33');
+  const critCard     = kpi('&#128993;', k.critCount,     'Critical today','#e0a020');
+  const healthyCard  = kpi('&#128994;', k.healthyCount,  'Healthy today', '#1f7a3a');
+  const onTimeCard   = kpi('&#9200;',    k.onTimeToday,  'On time (< 9AM)','#345');
+  const kpiRow = \`<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">\${complianceCard}\${oosCard}\${critCard}\${healthyCard}\${onTimeCard}</div>\`;
+
+  // Category breakdown chart (stacked bars)
+  const catBars = STOCK_CATS.map(c => {
+    const b = monRes.catBreakdown[c.name] || { OOS:0, Critical:0, Healthy:0 };
+    const total = b.OOS + b.Critical + b.Healthy;
+    if (!total) {
+      return \`<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <div style="width:100px;font-size:13px;font-weight:600">\${c.icon} \${c.name}</div>
+        <div style="flex:1;height:22px;background:#f2f2f2;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:11px">No data yet</div>
+      </div>\`;
+    }
+    const seg = (v, bg, lbl) => v ? '<div style="width:'+(v/total*100)+'%;background:'+bg+';color:#fff;font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center">'+v+'</div>' : '';
+    return \`<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+      <div style="width:100px;font-size:13px;font-weight:600">\${c.icon} \${c.name}</div>
+      <div style="flex:1;height:22px;background:#eee;border-radius:6px;overflow:hidden;display:flex">
+        \${seg(b.OOS,'#c33','OOS')}\${seg(b.Critical,'#e0a020','Critical')}\${seg(b.Healthy,'#1f7a3a','Healthy')}
+      </div>
+      <div style="width:50px;text-align:right;font-size:12px;color:#556">\${total}</div>
+    </div>\`;
+  }).join('');
+  const chartCard = \`<div class="card"><h3 style="margin:0 0 10px;color:#1f7a3a">Stock Status by Category - Today</h3>
+    <div style="display:flex;gap:12px;margin-bottom:10px;font-size:11px;font-weight:600">
+      <span><span style="display:inline-block;width:10px;height:10px;background:#c33;border-radius:2px;vertical-align:middle;margin-right:4px"></span>OOS</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#e0a020;border-radius:2px;vertical-align:middle;margin-right:4px"></span>Critical</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#1f7a3a;border-radius:2px;vertical-align:middle;margin-right:4px"></span>Healthy</span>
+    </div>
+    \${catBars}
+  </div>\`;
+
+  // AM Submission Form (only for AM)
+  let formCard = '';
+  if (isAM) {
+    // Preload existing submission if any
+    const existing = {};
+    (latestRes.entries || []).forEach(e => { existing[e.category] = { status: e.status, remarks: e.remarks || '' }; });
+    STOCK_STATE.entries = {};
+    STOCK_CATS.forEach(c => STOCK_STATE.entries[c.name] = existing[c.name] || { status: '', remarks: '' });
+    const hasExisting = (latestRes.entries || []).length > 0;
+    formCard = \`<div class="card">
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+        <h3 style="margin:0;color:#1f7a3a">\${hasExisting?'Update':'Submit'} Stock Status Report</h3>
+        <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${today}</span>
+        \${hasExisting?'<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>':''}
+      </div>
+      <div style="margin-bottom:12px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
+        <b style="color:#a06800">DEADLINE:</b> Submit before <b>9:00 AM</b> daily. Late submissions count against your compliance.
+      </div>
+      <div id="stockForm">\${STOCK_CATS.map(c => stockRowHTML(c)).join('')}</div>
+      <div style="margin-top:12px"><button id="stockSubmitBtn">\${hasExisting?'Update Report':'Submit Report'}</button></div>
+      <div id="stockErr" class="err"></div>
+    </div>\`;
+  }
+
+  // Reports table (RM sees all, AM sees their own history)
+  const reportsHtml = monRes.reports.length ? monRes.reports.slice(0,50).map(r => {
+    const cats = STOCK_CATS.map(c => {
+      const cat = r.categories[c.name];
+      if (!cat) return \`<td style="padding:4px;text-align:center;background:#f7f7f7;color:#bbb">-</td>\`;
+      const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789', fg:'#fff' };
+      return \`<td style="padding:4px;text-align:center;background:\${opt.bg};color:\${opt.fg};font-weight:700;font-size:11px" title="\${escapeHtml(cat.remarks||'')}">\${cat.status}</td>\`;
+    }).join('');
+    const badge = r.onTime ? '<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>' : '<span class="pill" style="background:#c33;font-size:10px">LATE</span>';
+    return \`<tr>
+      <td style="padding:4px 8px;font-weight:600;font-size:12px">\${escapeHtml(r.manager)}</td>
+      <td style="padding:4px 8px;font-size:12px">\${escapeHtml(r.date)}</td>
+      <td style="padding:4px;text-align:center">\${badge}</td>
+      \${cats}
+      <td style="padding:4px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
+    </tr>\`;
+  }).join('') : '';
+  const missingHtml = (monRes.missingAMs && monRes.missingAMs.length) ? \`<div class="card" style="border-left:6px solid #c33;background:linear-gradient(135deg,#fff5f5 0%,#ffe8e8 100%)">
+    <div style="display:flex;align-items:center;gap:12px">
+      <div style="font-size:28px">&#9888;</div>
+      <div style="flex:1">
+        <div style="color:#c33;font-weight:800;font-size:15px">NOT YET SUBMITTED TODAY</div>
+        <div style="margin-top:6px">\${monRes.missingAMs.map(m => '<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:4px 10px;border-radius:20px;margin:2px;font-weight:600;font-size:12px">&#9888; '+escapeHtml(m)+'</span>').join('')}</div>
+      </div>
+    </div></div>\` : '';
+  const tableCard = \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Reports (Today)</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#eef">
+        <th style="padding:6px 8px;text-align:left">Area Manager</th>
+        <th style="padding:6px 8px;text-align:left">Date</th>
+        <th style="padding:6px;text-align:center">Status</th>
+        \${STOCK_CATS.map(c => '<th style="padding:6px;text-align:center;width:70px">'+c.icon+' '+c.name+'</th>').join('')}
+        <th style="padding:6px 8px;text-align:left">Submitted At</th>
+      </tr></thead>
+      <tbody>\${reportsHtml || '<tr><td colspan="'+(4+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports today yet</td></tr>'}</tbody>
+    </table></div></div>\`;
+
+  $('#stockOut').innerHTML = kpiRow + missingHtml + chartCard + formCard + tableCard;
+
+  // Wire up form buttons
+  if (isAM) {
+    document.querySelectorAll('[data-stockcat]').forEach(btn => btn.onclick = () => {
+      const cat = btn.dataset.stockcat, val = btn.dataset.stockval;
+      STOCK_STATE.entries[cat].status = val;
+      renderStockForm();
+    });
+    document.querySelectorAll('[data-stockremarks]').forEach(ta => ta.oninput = () => {
+      STOCK_STATE.entries[ta.dataset.stockremarks].remarks = ta.value;
+    });
+    $('#stockSubmitBtn').onclick = submitStock;
+  }
+}
+
+function stockRowHTML(c){
+  const st = STOCK_STATE.entries[c.name] || { status:'', remarks:'' };
+  const btns = STOCK_OPTS.map(o => {
+    const on = st.status === o.v;
+    return \`<button type="button" data-stockcat="\${c.name}" data-stockval="\${o.v}" style="flex:1;background:\${on?o.bg:'#eef'};color:\${on?o.fg:'#334'};border:0;border-radius:8px;padding:10px;font-weight:700;cursor:pointer;font-size:13px">\${o.lbl}</button>\`;
+  }).join('');
+  return \`<div style="padding:12px 0;border-bottom:1px solid #eee">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="font-size:22px">\${c.icon}</div>
+      <div style="font-weight:700;font-size:15px;color:#1f7a3a">\${c.name}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px">\${btns}</div>
+    <textarea data-stockremarks="\${c.name}" placeholder="Remarks / brief explanation (optional)" style="min-height:44px">\${escapeHtml(st.remarks||'')}</textarea>
+  </div>\`;
+}
+
+function renderStockForm(){
+  document.querySelectorAll('[data-stockcat]').forEach(btn => {
+    const cat = btn.dataset.stockcat, val = btn.dataset.stockval;
+    const on = STOCK_STATE.entries[cat].status === val;
+    const opt = STOCK_OPTS.find(o => o.v === val);
+    btn.style.background = on ? opt.bg : '#eef';
+    btn.style.color      = on ? opt.fg : '#334';
+  });
+}
+
+async function submitStock(){
+  $('#stockErr').textContent = '';
+  const entries = STOCK_CATS.map(c => ({ category: c.name, status: STOCK_STATE.entries[c.name].status, remarks: STOCK_STATE.entries[c.name].remarks }));
+  const missing = entries.filter(e => !e.status).map(e => e.category);
+  if (missing.length) { $('#stockErr').textContent = 'Please select a status for: ' + missing.join(', '); return; }
+  const btn = $('#stockSubmitBtn'); btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Submitting...';
+  const r = await api('/api/stock-submit', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ manager: S.manager, date: todayStr(), entries }) });
+  btn.disabled = false; btn.textContent = orig;
+  if (!r.ok) { $('#stockErr').textContent = r.error || 'Failed'; return; }
+  alert('Stock Status Report submitted');
+  loadStockTab();
+}
 
 // Auto-login if remembered
 const remembered = localStorage.getItem('ff5_mgr');

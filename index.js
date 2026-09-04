@@ -776,7 +776,7 @@ app.get('/api/stock-monitor', async (req, res) => {
       const submitted = new Date(timestamp);
       const phHour = (submitted.getUTCHours() + 8) % 24;
       const submittedDatePH = new Date(submitted.getTime() + 8*3600*1000).toISOString().slice(0,10);
-      const onTime = (submittedDatePH < date) || (submittedDatePH === date && phHour < 9);
+      const onTime = (submittedDatePH < date) || (submittedDatePH === date && phHour < 10);
       reports.push({ manager: am, date, reportId: obj.id, timestamp, categories: catMap, onTime });
     });
     reports.sort((a,b) => b.date.localeCompare(a.date) || a.manager.localeCompare(b.manager));
@@ -2089,7 +2089,7 @@ async function loadStockTab(){
   const oosCard      = kpi('&#128308;', k.oosCount,      'OOS today',     '#c33');
   const critCard     = kpi('&#128993;', k.critCount,     'Critical today','#e0a020');
   const healthyCard  = kpi('&#128994;', k.healthyCount,  'Healthy today', '#1f7a3a');
-  const onTimeCard   = kpi('&#9200;',    k.onTimeToday,  'On time (< 9AM)','#345');
+  const onTimeCard   = kpi('&#9200;',    k.onTimeToday,  'On time (< 10AM)','#345');
   const kpiRow = \`<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">\${complianceCard}\${oosCard}\${critCard}\${healthyCard}\${onTimeCard}</div>\`;
 
   // Category breakdown chart (stacked bars)
@@ -2136,7 +2136,7 @@ async function loadStockTab(){
         \${hasExisting?'<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>':''}
       </div>
       <div style="margin-bottom:12px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
-        <b style="color:#a06800">DEADLINE:</b> Submit before <b>9:00 AM</b> daily. Late submissions count against your compliance.
+        <b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Late submissions count against your compliance.
       </div>
       <div id="stockForm">\${STOCK_CATS.map(c => stockRowHTML(c)).join('')}</div>
       <div style="margin-top:12px"><button id="stockSubmitBtn">\${hasExisting?'Update Report':'Submit Report'}</button></div>
@@ -2325,7 +2325,7 @@ function exportStockExcel(){
       <tr><td style="padding:6px 12px;background:#c33;color:#fff;font-weight:bold;text-align:center">OOS</td><td style="padding:6px 12px;font-weight:bold">\${k.oosCount}</td><td style="padding:6px 12px;color:#789">categories out of stock today</td></tr>
       <tr><td style="padding:6px 12px;background:#e0a020;color:#fff;font-weight:bold;text-align:center">Critical</td><td style="padding:6px 12px;font-weight:bold">\${k.critCount}</td><td style="padding:6px 12px;color:#789">categories at critical today</td></tr>
       <tr><td style="padding:6px 12px;background:#1f7a3a;color:#fff;font-weight:bold;text-align:center">Healthy</td><td style="padding:6px 12px;font-weight:bold">\${k.healthyCount}</td><td style="padding:6px 12px;color:#789">categories healthy today</td></tr>
-      <tr><td style="padding:6px 12px;background:#345;color:#fff;font-weight:bold;text-align:center">On Time</td><td style="padding:6px 12px;font-weight:bold">\${k.onTimeToday}</td><td style="padding:6px 12px;color:#789">AM reports submitted before 9AM</td></tr>
+      <tr><td style="padding:6px 12px;background:#345;color:#fff;font-weight:bold;text-align:center">On Time</td><td style="padding:6px 12px;font-weight:bold">\${k.onTimeToday}</td><td style="padding:6px 12px;color:#789">AM reports submitted before 10AM</td></tr>
     </table>\`;
 
   const streakRows = scopeAMs.map(am => {
@@ -2419,4 +2419,4 @@ if (remembered) {
 
 app.get('/', (req, res) => res.type('html').send(HTML));
 
-app.listen(PORT, () => console.log('Fresh Focus 5 Checklist listening on', PORT));
+app.listen(PORT, () => console.log('Fresh Focus 5 Checklist listening on', PORT

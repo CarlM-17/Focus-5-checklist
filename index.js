@@ -681,11 +681,12 @@ app.get('/api/store-checks-monitor', async (req, res) => {
 const STOCK_CATEGORIES = ['Rice','Eggs','Poultry','Meat','Sugar'];
 const STOCK_STATUSES   = ['OOS','Critical','Healthy'];
 
-async function markStockEdited(manager, date) {
+async function markStockEdited(manager, date, newId) {
   const rows = await sheetsGet('StockStatus!A2:H');
   const data = [];
   rows.forEach((r, i) => {
     if ((r[7] || 'ACTIVE') !== 'ACTIVE') return;
+    if (newId && r[1] === newId) return; // never mark the row we just appended
     if ((r[2] || '').trim().toLowerCase() === manager.trim().toLowerCase() && r[3] === date) {
       data.push({ range: `StockStatus!H${i + 2}`, values: [['EDITED']] });
     }
@@ -707,7 +708,7 @@ app.post('/api/stock-submit', async (req, res) => {
     const id = 'K' + Date.now();
     const rows = entries.map((e) => [ts, id, manager, date, e.category, e.status, e.remarks || '', 'ACTIVE']);
     await sheetsAppend('StockStatus!A1:H1', rows);
-    try { await markStockEdited(manager, date); } catch(_){}
+    try { await markStockEdited(manager, date, id); } catch(_){}
     res.json({ ok: true, reportId: id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

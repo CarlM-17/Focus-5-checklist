@@ -804,7 +804,31 @@ app.get('/api/stock-monitor', async (req, res) => {
 
     const missingAMs = scopeAMs.filter(am => !submittedTodayAMs.has(am));
 
-    res.json({ ok: true, reports, kpis: { complianceRate, submittedToday, totalAMs, oosCount, critCount, healthyCount, onTimeToday }, catBreakdown, missingAMs, todayPH });
+    // Per-AM streaks: consecutive days going back from yesterday where the AM was Late OR Missed.
+    // Uses all reports in the filtered range (bounded by from/to).
+    const reportsByAMDate = {};
+    reports.forEach(r => { reportsByAMDate[r.manager + '||' + r.date] = r; });
+    const yesterdayPH = new Date(nowPH.getTime() - 86400*1000).toISOString().slice(0,10);
+    const rangeStart = from || todayPH; // don't count beyond query range
+    const amStats = {};
+    scopeAMs.forEach(am => {
+      let streak = 0, onTimeDays = 0, lateDays = 0, missedDays = 0;
+      // Walk backwards from yesterday day-by-day; stop when leaving the from/to range
+      const cursor = new Date(yesterdayPH + 'T00:00:00');
+      const stopAt = new Date(rangeStart + 'T00:00:00');
+      let streakLive = true;
+      while (cursor >= stopAt) {
+        const dStr = cursor.getFullYear() + '-' + String(cursor.getMonth()+1).padStart(2,'0') + '-' + String(cursor.getDate()).padStart(2,'0');
+        const rep = reportsByAMDate[am + '||' + dStr];
+        if (!rep) { if (streakLive) streak++; missedDays++; }
+        else if (rep.onTime) { streakLive = false; onTimeDays++; }
+        else { if (streakLive) streak++; lateDays++; }
+        cursor.setDate(cursor.getDate() - 1);
+      }
+      amStats[am] = { streak, onTimeDays, lateDays, missedDays };
+    });
+
+    res.json({ ok: true, reports, kpis: { complianceRate, submittedToday, totalAMs, oosCount, critCount, healthyCount, onTimeToday }, catBreakdown, missingAMs, amStats, scopeAMs, todayPH });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -2017,7 +2041,7 @@ const STOCK_OPTS = [
   { v: 'Critical', lbl: 'Critical', bg: '#e0a020', fg: '#fff' },
   { v: 'Healthy',  lbl: 'Healthy',  bg: '#1f7a3a', fg: '#fff' },
 ];
-let STOCK_STATE = { entries: {} }; // { Rice: {status,remarks}, ... }
+let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null };
 
 async function loadStockTab(){
   const level = (S.level||'').toLowerCase();
@@ -2025,12 +2049,26 @@ async function loadStockTab(){
   const isRM = level === 'regional manager';
   $('#stockOut').innerHTML = '<div class="card muted">Loading...</div>';
   const today = todayStr();
+  if (!STOCK_STATE.from) STOCK_STATE.from = todayStr(-29);
+  if (!STOCK_STATE.to)   STOCK_STATE.to   = today;
   const [monRes, latestRes] = await Promise.all([
-    api('/api/stock-monitor?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + '&from=' + today + '&to=' + today),
+    api('/api/stock-monitor?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + '&from=' + STOCK_STATE.from + '&to=' + STOCK_STATE.to),
     isAM ? api('/api/stock-latest?manager=' + encodeURIComponent(S.manager) + '&date=' + today) : Promise.resolve({ ok:true, entries: [] })
   ]);
   if (!monRes.ok){ $('#stockOut').innerHTML = '<div class="card err">'+escapeHtml(monRes.error||'Failed')+'</div>'; return; }
+  STOCK_STATE.lastData = monRes;
   const k = monRes.kpis;
+  const filterCard = \`<div class="card">
+    <div class="row">
+      <div><label>From</label><input id="stockFrom" type="date" value="\${STOCK_STATE.from}"/></div>
+      <div><label>To</label><input id="stockTo" type="date" value="\${STOCK_STATE.to}"/></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button id="stockApplyBtn">Apply</button>
+      <button id="stockExportBtn" class="ghost">Export to Excel</button>
+    </div>
+    <div class="muted" style="margin-top:6px;font-size:12px">History and streak use this range. KPIs and today's chart always reflect today only.</div>
+  </div>\`;
 
   // KPI cards row
   const kpi = (icon, num, lbl, bg, sub) => \`<div style="flex:1 1 140px;min-width:0;background:\${bg};color:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
@@ -2115,14 +2153,68 @@ async function loadStockTab(){
       <td style="padding:4px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
     </tr>\`;
   }).join('') : '';
+  const streakChip = (am) => {
+    const s = (monRes.amStats||{})[am];
+    if (!s || !s.streak) return '';
+    return '<span style="display:inline-block;background:#c33;color:#fff;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;margin-left:6px">' + s.streak + 'd streak</span>';
+  };
   const missingHtml = (monRes.missingAMs && monRes.missingAMs.length) ? \`<div class="card" style="border-left:6px solid #c33;background:linear-gradient(135deg,#fff5f5 0%,#ffe8e8 100%)">
     <div style="display:flex;align-items:center;gap:12px">
       <div style="font-size:28px">&#9888;</div>
       <div style="flex:1">
         <div style="color:#c33;font-weight:800;font-size:15px">NOT YET SUBMITTED TODAY</div>
-        <div style="margin-top:6px">\${monRes.missingAMs.map(m => '<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:4px 10px;border-radius:20px;margin:2px;font-weight:600;font-size:12px">&#9888; '+escapeHtml(m)+'</span>').join('')}</div>
+        <div style="margin-top:6px">\${monRes.missingAMs.map(m => '<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:4px 10px;border-radius:20px;margin:2px;font-weight:600;font-size:12px">&#9888; '+escapeHtml(m)+streakChip(m)+'</span>').join('')}</div>
       </div>
     </div></div>\` : '';
+
+  // ---- Per-AM history (all reports in range grouped by AM) ----
+  const historyByAM = {};
+  (monRes.scopeAMs || []).forEach(am => historyByAM[am] = []);
+  monRes.reports.forEach(r => { (historyByAM[r.manager] = historyByAM[r.manager] || []).push(r); });
+  const historyCard = \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <h3 style="margin:0;color:#1f7a3a">Per-AM History</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:10px">Click an AM to expand daily reports. Streak = consecutive Late-or-Missed days ending yesterday.</div>
+    \${(monRes.scopeAMs||[]).map(am => {
+      const s = (monRes.amStats||{})[am] || { streak:0, onTimeDays:0, lateDays:0, missedDays:0 };
+      const list = historyByAM[am] || [];
+      const streakBg = s.streak >= 3 ? '#c33' : s.streak >= 1 ? '#e0a020' : '#1f7a3a';
+      const expanded = STOCK_STATE.expanded[am];
+      const rowsHtml = expanded ? (list.length ? list.slice(0,60).map(r => {
+        const cats = STOCK_CATS.map(c => {
+          const cat = r.categories[c.name];
+          if (!cat) return '<td style="padding:3px;text-align:center;background:#f7f7f7;color:#bbb;font-size:11px">-</td>';
+          const opt = STOCK_OPTS.find(o => o.v === cat.status) || { bg:'#789', fg:'#fff' };
+          return '<td style="padding:3px;text-align:center;background:'+opt.bg+';color:'+opt.fg+';font-weight:700;font-size:11px" title="'+escapeHtml(cat.remarks||'')+'">'+cat.status+'</td>';
+        }).join('');
+        const badge = r.onTime ? '<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>' : '<span class="pill" style="background:#c33;font-size:10px">LATE</span>';
+        return \`<tr>
+          <td style="padding:3px 8px;font-size:12px">\${escapeHtml(r.date)}</td>
+          <td style="padding:3px;text-align:center">\${badge}</td>
+          \${cats}
+          <td style="padding:3px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
+        </tr>\`;
+      }).join('') : '<tr><td colspan="'+(3+STOCK_CATS.length)+'" style="padding:8px;text-align:center;color:#789;font-size:12px">No reports in range</td></tr>') : '';
+      const tableHtml = expanded ? \`<div style="margin-top:8px;overflow-x:auto"><table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:#eef"><th style="padding:4px 8px;text-align:left;font-size:11px">Date</th><th style="padding:4px;text-align:center;font-size:11px">Status</th>\${STOCK_CATS.map(c => '<th style="padding:4px;text-align:center;width:60px;font-size:11px">'+c.icon+' '+c.name+'</th>').join('')}<th style="padding:4px 8px;text-align:left;font-size:11px">Submitted</th></tr></thead>
+        <tbody>\${rowsHtml}</tbody></table></div>\` : '';
+      return \`<div style="padding:10px;border:1px solid #eee;border-radius:8px;margin-bottom:6px;background:\${expanded?'#f8fcf9':'#fff'}">
+        <div style="display:flex;align-items:center;gap:10px;cursor:pointer" onclick="toggleAMHistory('\${am}')">
+          <div style="flex:1;font-weight:700;color:#1f7a3a">\${escapeHtml(am)}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px">
+            <span style="background:\${streakBg};color:#fff;padding:2px 8px;border-radius:10px;font-weight:700">Streak \${s.streak}d</span>
+            <span style="background:#e8f5ec;color:#1f7a3a;padding:2px 8px;border-radius:10px;font-weight:600">On-time \${s.onTimeDays}</span>
+            <span style="background:#fff5e0;color:#b8860b;padding:2px 8px;border-radius:10px;font-weight:600">Late \${s.lateDays}</span>
+            <span style="background:#fee;color:#c33;padding:2px 8px;border-radius:10px;font-weight:600">Missed \${s.missedDays}</span>
+          </div>
+          <div style="color:#789;font-size:14px">\${expanded?'&#9660;':'&#9654;'}</div>
+        </div>
+        \${tableHtml}
+      </div>\`;
+    }).join('')}
+  </div>\`;
   const tableCard = \`<div class="card"><h3 style="margin:0 0 8px;color:#1f7a3a">Reports (Today)</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:#eef">
@@ -2135,7 +2227,10 @@ async function loadStockTab(){
       <tbody>\${reportsHtml || '<tr><td colspan="'+(4+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports today yet</td></tr>'}</tbody>
     </table></div></div>\`;
 
-  $('#stockOut').innerHTML = kpiRow + missingHtml + chartCard + formCard + tableCard;
+  $('#stockOut').innerHTML = kpiRow + missingHtml + chartCard + formCard + tableCard + historyCard + filterCard;
+
+  $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; loadStockTab(); };
+  $('#stockExportBtn').onclick = exportStockExcel;
 
   // Wire up form buttons
   if (isAM) {
@@ -2175,6 +2270,92 @@ function renderStockForm(){
     btn.style.background = on ? opt.bg : '#eef';
     btn.style.color      = on ? opt.fg : '#334';
   });
+}
+
+function toggleAMHistory(am){
+  STOCK_STATE.expanded[am] = !STOCK_STATE.expanded[am];
+  loadStockTab();
+}
+
+function exportStockExcel(){
+  const data = STOCK_STATE.lastData;
+  if (!data) { alert('Load first'); return; }
+  const scopeAMs = data.scopeAMs || [];
+  const stats = data.amStats || {};
+  const scoreBg = p => p>=80 ? '#1f7a3a' : p>=50 ? '#e0a020' : '#c33';
+  const statusColor = (st) => st==='OOS' ? '#c33' : st==='Critical' ? '#e0a020' : st==='Healthy' ? '#1f7a3a' : '#789';
+  const k = data.kpis;
+
+  const summaryHtml = \`
+    <table style="border-collapse:collapse;margin-bottom:14px">
+      <tr><td style="padding:6px 12px;background:#\${(k.complianceRate>=80?'1f7a3a':k.complianceRate>=50?'e0a020':'c33')};color:#fff;font-weight:bold;width:120px;text-align:center">Compliance</td><td style="padding:6px 12px;font-weight:bold;font-size:18px">\${k.complianceRate}%</td><td style="padding:6px 12px;color:#789">\${k.submittedToday} of \${k.totalAMs} AMs today</td></tr>
+      <tr><td style="padding:6px 12px;background:#c33;color:#fff;font-weight:bold;text-align:center">OOS</td><td style="padding:6px 12px;font-weight:bold">\${k.oosCount}</td><td style="padding:6px 12px;color:#789">categories out of stock today</td></tr>
+      <tr><td style="padding:6px 12px;background:#e0a020;color:#fff;font-weight:bold;text-align:center">Critical</td><td style="padding:6px 12px;font-weight:bold">\${k.critCount}</td><td style="padding:6px 12px;color:#789">categories at critical today</td></tr>
+      <tr><td style="padding:6px 12px;background:#1f7a3a;color:#fff;font-weight:bold;text-align:center">Healthy</td><td style="padding:6px 12px;font-weight:bold">\${k.healthyCount}</td><td style="padding:6px 12px;color:#789">categories healthy today</td></tr>
+      <tr><td style="padding:6px 12px;background:#345;color:#fff;font-weight:bold;text-align:center">On Time</td><td style="padding:6px 12px;font-weight:bold">\${k.onTimeToday}</td><td style="padding:6px 12px;color:#789">AM reports submitted before 9AM</td></tr>
+    </table>\`;
+
+  const streakRows = scopeAMs.map(am => {
+    const s = stats[am] || { streak:0, onTimeDays:0, lateDays:0, missedDays:0 };
+    const total = s.onTimeDays + s.lateDays + s.missedDays;
+    const rate = total ? Math.round((s.onTimeDays / total) * 100) : 0;
+    const streakColor = s.streak >= 3 ? '#c33' : s.streak >= 1 ? '#e0a020' : '#1f7a3a';
+    return \`<tr>
+      <td style="border:1px solid #b0b0b0;padding:6px 8px;font-weight:bold">\${escapeHtml(am)}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${streakColor};color:#fff;font-weight:bold">\${s.streak}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#1f7a3a;font-weight:bold">\${s.onTimeDays}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#b8860b;font-weight:bold">\${s.lateDays}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;color:#c33;font-weight:bold">\${s.missedDays}</td>
+      <td style="border:1px solid #b0b0b0;padding:6px;text-align:center;background:\${scoreBg(rate)};color:#fff;font-weight:bold">\${rate}%</td>
+    </tr>\`;
+  }).join('');
+
+  const reportRows = data.reports.slice(0, 500).map(r => {
+    const cats = STOCK_CATS.map(c => {
+      const cat = r.categories[c.name];
+      if (!cat) return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;color:#bbb">-</td>';
+      return '<td style="border:1px solid #b0b0b0;padding:5px;text-align:center;background:'+statusColor(cat.status)+';color:#fff;font-weight:bold">'+cat.status+'</td>';
+    }).join('');
+    const remarks = STOCK_CATS.map(c => {
+      const cat = r.categories[c.name];
+      return '<td style="border:1px solid #b0b0b0;padding:5px;font-size:11px">'+escapeHtml((cat&&cat.remarks)||'')+'</td>';
+    }).join('');
+    const badge = r.onTime ? '<span style="background:#1f7a3a;color:#fff;padding:2px 8px;border-radius:8px;font-weight:bold;font-size:11px">ON TIME</span>' : '<span style="background:#c33;color:#fff;padding:2px 8px;border-radius:8px;font-weight:bold;font-size:11px">LATE</span>';
+    return \`<tr>
+      <td style="border:1px solid #b0b0b0;padding:5px 8px;font-weight:bold">\${escapeHtml(r.manager)}</td>
+      <td style="border:1px solid #b0b0b0;padding:5px 8px">\${escapeHtml(r.date)}</td>
+      <td style="border:1px solid #b0b0b0;padding:5px;text-align:center">\${badge}</td>
+      \${cats}
+      \${remarks}
+      <td style="border:1px solid #b0b0b0;padding:5px 8px;font-size:11px;color:#789">\${new Date(r.timestamp).toLocaleString()}</td>
+    </tr>\`;
+  }).join('');
+
+  const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Stock Status</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>
+<body style="font-family:Calibri,Arial,sans-serif">
+  <h1 style="color:#1f7a3a;text-align:center;margin:0 0 8px">Focus 5 Stock Status Report</h1>
+  <div style="text-align:center;color:#789;margin-bottom:14px">\${STOCK_STATE.from} to \${STOCK_STATE.to} - Generated \${new Date().toLocaleString()}</div>
+  <h2 style="color:#1f7a3a">Summary - Today</h2>
+  \${summaryHtml}
+  <h2 style="color:#1f7a3a">Per-AM Statistics (\${STOCK_STATE.from} to \${STOCK_STATE.to})</h2>
+  <table style="border-collapse:collapse;font-size:12px;margin-bottom:14px">
+    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:8px;text-align:left">Area Manager</th><th style="border:1px solid #b0b0b0;padding:8px">Current Streak (days)</th><th style="border:1px solid #b0b0b0;padding:8px">On Time</th><th style="border:1px solid #b0b0b0;padding:8px">Late</th><th style="border:1px solid #b0b0b0;padding:8px">Missed</th><th style="border:1px solid #b0b0b0;padding:8px">On-Time %</th></tr></thead>
+    <tbody>\${streakRows}</tbody>
+  </table>
+  <h2 style="color:#1f7a3a">All Reports</h2>
+  <table style="border-collapse:collapse;font-size:11px">
+    <thead><tr style="background:#1f7a3a;color:#fff"><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Area Manager</th><th style="border:1px solid #b0b0b0;padding:6px 8px;text-align:left">Date</th><th style="border:1px solid #b0b0b0;padding:6px">Status</th>\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+'</th>').join('')}\${STOCK_CATS.map(c => '<th style="border:1px solid #b0b0b0;padding:6px">'+c.name+' Remarks</th>').join('')}<th style="border:1px solid #b0b0b0;padding:6px 8px">Submitted At</th></tr></thead>
+    <tbody>\${reportRows}</tbody>
+  </table>
+</body></html>\`;
+  const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Focus5_Stock_Status_' + todayStr() + '.xls';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 async function submitStock(){

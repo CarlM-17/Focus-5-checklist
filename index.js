@@ -2399,6 +2399,8 @@ async function loadStockTab(){
 
   // Flag stores that need HQ escalation: rate >= 50% OR problemDays >= 3
   const flaggedStores = watchlist.filter(s => s.rate >= 50 || s.problemDays >= 3);
+  STOCK_STATE.watchlist = watchlist;
+  STOCK_STATE.flaggedStores = flaggedStores;
 
   // Insert extra KPI tile into KPI row
   const chronicCard = kpi('&#127919;', flaggedStores.length, 'Chronic Stores', flaggedStores.length ? '#c33' : '#345', 'flag for HQ merch');
@@ -2425,7 +2427,10 @@ async function loadStockTab(){
       <h3 style="margin:0;color:#c33">&#128204; Merchandising Watchlist - Chronic OOS &amp; Critical</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:8px">Ranked by problem rate across the whole date range. <b>FLAG HQ</b> = 50%+ of reported days had issues, OR 3+ problem days. Send this list to merchandising head office.</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+      <div class="muted" style="font-size:12px;flex:1;min-width:200px">Ranked by problem rate across the whole date range. <b>FLAG HQ</b> = 50%+ of reported days had issues, OR 3+ problem days.</div>
+      <button id="watchExportBtn" style="background:#c33">&#128228; Export Flagged Stores to HQ</button>
+    </div>
     \${watchlist.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:#eef">
         <th style="padding:6px;width:40px;text-align:center">Rank</th>
@@ -2467,6 +2472,7 @@ async function loadStockTab(){
   $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; STOCK_STATE.singleDate = null; loadStockTab(); };
   $('#stockExportBtn').onclick = exportStockExcel;
   const sdSel = $('#stockSingleDate'); if (sdSel) sdSel.onchange = () => { STOCK_STATE.singleDate = sdSel.value; loadStockTab(); };
+  const wexp = $('#watchExportBtn'); if (wexp) wexp.onclick = exportWatchlistHQ;
 
   // Wire up form buttons
   if (isAM && STOCK_STATE.amStores.length) {
@@ -2614,6 +2620,129 @@ function exportStockExcel(){
   const a = document.createElement('a');
   a.href = url;
   a.download = 'Focus5_Stock_Status_' + todayStr() + '.xls';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportWatchlistHQ(){
+  const data = STOCK_STATE.lastData;
+  const flagged = STOCK_STATE.flaggedStores || [];
+  if (!data) { alert('Load first'); return; }
+  if (!flagged.length) { alert('No stores flagged for HQ escalation in this range.'); return; }
+
+  const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6';
+  const OOS_C = '#c33', CRIT_C = '#e0a020';
+
+  // Build per-store detailed incident list from reports in the range
+  const incidentsByStore = {};
+  data.reports.forEach(r => {
+    STOCK_CATS.forEach(c => {
+      (r.categories[c.name]||[]).forEach(e => {
+        if (e.status !== 'OOS' && e.status !== 'Critical') return;
+        if (!incidentsByStore[e.store]) incidentsByStore[e.store] = [];
+        incidentsByStore[e.store].push({ date: r.date, manager: r.manager, category: c.name, status: e.status, remarks: e.remarks || '' });
+      });
+    });
+  });
+  Object.values(incidentsByStore).forEach(list => list.sort((a,b) => b.date.localeCompare(a.date) || (a.status==='OOS'?-1:1)));
+
+  // Cover header
+  const headerBlock = \`
+    <div style="background:\${DARK};color:#fff;padding:18px 24px;margin:0 0 4px">
+      <div style="font-size:22px;font-weight:bold;letter-spacing:.5px">MERCHANDISING ESCALATION REPORT</div>
+      <div style="font-size:14px;opacity:.92;margin-top:4px">Focus 5 Stock Status - Stores Flagged for HQ Review</div>
+    </div>
+    <table style="border-collapse:collapse;margin:0 0 18px;font-size:12px">
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Reporting Period</td><td style="padding:6px 12px">\${STOCK_STATE.from} to \${STOCK_STATE.to}</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Prepared By</td><td style="padding:6px 12px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Generated</td><td style="padding:6px 12px">\${new Date().toLocaleString()}</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Flag Criteria</td><td style="padding:6px 12px">Problem rate &ge; 50% OR 3+ problem days in the period</td></tr>
+    </table>\`;
+
+  // Executive KPIs
+  const totOOS = flagged.reduce((n,s) => n+s.oosCount, 0);
+  const totCrit = flagged.reduce((n,s) => n+s.critCount, 0);
+  const totProbDays = flagged.reduce((n,s) => n+s.problemDays, 0);
+  const kpiBlock = \`
+    <table style="border-collapse:collapse;margin-bottom:18px;font-size:13px">
+      <tr>
+        <td style="padding:14px 20px;background:\${OOS_C};color:#fff;font-weight:bold;text-align:center;min-width:120px">
+          <div style="font-size:28px">\${flagged.length}</div>
+          <div style="font-size:11px;letter-spacing:.5px">STORES FLAGGED</div>
+        </td>
+        <td style="padding:14px 20px;background:\${OOS_C};color:#fff;font-weight:bold;text-align:center;min-width:120px">
+          <div style="font-size:28px">\${totOOS}</div>
+          <div style="font-size:11px;letter-spacing:.5px">OOS INSTANCES</div>
+        </td>
+        <td style="padding:14px 20px;background:\${CRIT_C};color:#fff;font-weight:bold;text-align:center;min-width:120px">
+          <div style="font-size:28px">\${totCrit}</div>
+          <div style="font-size:11px;letter-spacing:.5px">CRITICAL INSTANCES</div>
+        </td>
+        <td style="padding:14px 20px;background:\${DARK};color:#fff;font-weight:bold;text-align:center;min-width:120px">
+          <div style="font-size:28px">\${totProbDays}</div>
+          <div style="font-size:11px;letter-spacing:.5px">PROBLEM DAYS</div>
+        </td>
+      </tr>
+    </table>\`;
+
+  // Flagged stores overview table
+  const th = (t, w) => \`<th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER};font-weight:bold;text-align:left;\${w?'width:'+w:''}">\${t}</th>\`;
+  const overviewRows = flagged.map((s, i) => \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${OOS_C};color:#fff;font-weight:bold">\${i+1}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;font-weight:bold;color:\${DARKER}">\${escapeHtml(s.store)}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px">\${escapeHtml(s.manager)}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center">\${s.daysReported}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${OOS_C};font-weight:bold">\${s.problemDays}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${OOS_C};font-weight:bold">\${s.oosCount}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${CRIT_C};font-weight:bold">\${s.critCount}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px">\${escapeHtml(s.topCategory)}</td>
+    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${s.rate>=70?OOS_C:CRIT_C};color:#fff;font-weight:bold">\${s.rate}%</td>
+  </tr>\`).join('');
+  const overviewBlock = \`
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">FLAGGED STORES OVERVIEW</div>
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:22px">
+      <thead><tr>\${th('#','40px')}\${th('Store','160px')}\${th('Area Manager','120px')}\${th('Days Reported','70px')}\${th('Problem Days','70px')}\${th('OOS Instances','80px')}\${th('Critical Instances','80px')}\${th('Top Category','140px')}\${th('Problem Rate','80px')}</tr></thead>
+      <tbody>\${overviewRows}</tbody>
+    </table>\`;
+
+  // Detailed findings per store
+  const detailBlocks = flagged.map(s => {
+    const incs = incidentsByStore[s.store] || [];
+    const incRows = incs.map((inc, i) => \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
+      <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.date)}</td>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.category)}</td>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px;text-align:center;background:\${inc.status==='OOS'?OOS_C:CRIT_C};color:#fff;font-weight:bold;font-size:11px">\${inc.status}</td>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.remarks) || '<span style=\"color:#888;font-style:italic\">no remarks</span>'}</td>
+    </tr>\`).join('');
+    return \`
+      <div style="background:\${DARKER};color:#fff;padding:8px 12px;margin-top:14px;font-weight:bold;font-size:13px;letter-spacing:.3px">
+        \${escapeHtml(s.store)} <span style="opacity:.85;font-weight:normal;font-size:11px;margin-left:8px">- \${escapeHtml(s.manager)} | \${s.problemDays}/\${s.daysReported} problem days (\${s.rate}%)</span>
+      </div>
+      <table style="border-collapse:collapse;font-size:12px;margin-bottom:10px;width:100%">
+        <thead><tr>\${th('Date','90px')}\${th('Category','100px')}\${th('Status','60px')}\${th('Remarks / Details')}</tr></thead>
+        <tbody>\${incRows || '<tr><td colspan="4" style="padding:8px 10px;color:#666;font-style:italic">No detailed incidents recorded.</td></tr>'}</tbody>
+      </table>\`;
+  }).join('');
+
+  const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>HQ Escalation</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>
+<body style="font-family:Calibri,Arial,sans-serif;padding:0;margin:0">
+  \${headerBlock}
+  \${kpiBlock}
+  \${overviewBlock}
+  <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">DETAILED FINDINGS PER STORE</div>
+  <div style="color:#556;font-size:11px;margin:4px 0 8px">Every OOS and Critical incident for each flagged store, newest first. Use these details to drive replenishment and root-cause conversations.</div>
+  \${detailBlocks}
+  <div style="margin-top:22px;padding:10px 14px;background:\${LIGHT_BG};border-left:4px solid \${DARK};font-size:12px;color:\${DARKER}">
+    <b>Requested action:</b> please review flagged stores and confirm replenishment / delivery status. Priority to stores with 70%+ problem rate and highest OOS instances.
+  </div>
+</body></html>\`;
+
+  const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'HQ_Escalation_' + todayStr() + '.xls';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }

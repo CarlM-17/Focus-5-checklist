@@ -2067,7 +2067,7 @@ const STOCK_OPTS = [
   { v: 'Critical', lbl: 'Critical', bg: '#e0a020', fg: '#fff' },
   { v: 'Healthy',  lbl: 'Healthy',  bg: '#1f7a3a', fg: '#fff' },
 ];
-let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null, amStores: [] };
+let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null, amStores: [], singleDate: null };
 
 async function loadStockTab(){
   const level = (S.level||'').toLowerCase();
@@ -2183,7 +2183,15 @@ async function loadStockTab(){
     if (arr.some(x => x.status === 'Healthy')) return 'Healthy';
     return '';
   };
-  const reportsHtml = monRes.reports.length ? monRes.reports.slice(0,100).map(r => {
+  // Available dates (newest first) and default singleDate to the most recent
+  const availableDates = [...new Set(monRes.reports.map(r => r.date))].sort().reverse();
+  if (!STOCK_STATE.singleDate && availableDates.length) STOCK_STATE.singleDate = availableDates[0];
+  if (STOCK_STATE.singleDate && !availableDates.includes(STOCK_STATE.singleDate)) STOCK_STATE.singleDate = availableDates[0] || '';
+  const displayDate = STOCK_STATE.singleDate || 'All in range';
+  const filteredReports = STOCK_STATE.singleDate
+    ? monRes.reports.filter(r => r.date === STOCK_STATE.singleDate)
+    : monRes.reports;
+  const reportsHtml = filteredReports.length ? filteredReports.slice(0,100).map(r => {
     const cats = STOCK_CATS.map(c => {
       const arr = r.categories[c.name] || [];
       if (!arr.length) return \`<td style="padding:4px;text-align:center;background:#f7f7f7;color:#bbb">-</td>\`;
@@ -2288,10 +2296,15 @@ async function loadStockTab(){
       </div>\`;
     }).join('')}
   </div>\`;
+  const dateOptions = availableDates.map(d => \`<option value="\${d}" \${d===STOCK_STATE.singleDate?'selected':''}>\${d}\${d===availableDates[0]?' (most recent)':''}</option>\`).join('');
   const tableCard = \`<div class="card">
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
       <h3 style="margin:0;color:#1f7a3a">Reports</h3>
-      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${displayDate}</span>
+      <label style="font-size:12px;color:#334;display:flex;align-items:center;gap:6px">
+        Show:
+        <select id="stockSingleDate" style="padding:6px 8px;border:1px solid #ccd;border-radius:6px;font-size:12px">\${dateOptions || '<option>No data</option>'}</select>
+      </label>
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:10px">Click any row to view the remarks for each category.</div>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -2303,13 +2316,157 @@ async function loadStockTab(){
         <th style="padding:6px 8px;text-align:left">Submitted At</th>
         <th style="padding:6px;text-align:center;width:30px"></th>
       </tr></thead>
-      <tbody>\${reportsHtml || '<tr><td colspan="'+(5+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports in this range</td></tr>'}</tbody>
+      <tbody>\${reportsHtml || '<tr><td colspan="'+(5+STOCK_CATS.length)+'" style="padding:12px;text-align:center;color:#789">No reports for \${displayDate}</td></tr>'}</tbody>
     </table></div></div>\`;
 
-  $('#stockOut').innerHTML = kpiRow + filterCard + missingHtml + chartCard + formCard + tableCard + historyCard;
+  // ---- Urgent Stores table (OOS + Critical only, for the selected date) ----
+  const urgent = [];
+  filteredReports.forEach(r => {
+    STOCK_CATS.forEach(c => {
+      (r.categories[c.name] || []).forEach(e => {
+        if (e.status === 'OOS' || e.status === 'Critical') {
+          urgent.push({ store: e.store, category: c.name, catIcon: c.icon, status: e.status, remarks: e.remarks, manager: r.manager, timestamp: r.timestamp });
+        }
+      });
+    });
+  });
+  // Count issues per store (for priority indicator)
+  const perStoreCount = {}; const perStoreOOS = {};
+  urgent.forEach(u => {
+    perStoreCount[u.store] = (perStoreCount[u.store]||0) + 1;
+    if (u.status === 'OOS') perStoreOOS[u.store] = (perStoreOOS[u.store]||0) + 1;
+  });
+  urgent.sort((a,b) => {
+    // Priority: more OOS first, then more total issues, then store name, OOS before Critical within
+    const oosDiff = (perStoreOOS[b.store]||0) - (perStoreOOS[a.store]||0);
+    if (oosDiff !== 0) return oosDiff;
+    const cntDiff = (perStoreCount[b.store]||0) - (perStoreCount[a.store]||0);
+    if (cntDiff !== 0) return cntDiff;
+    if (a.store !== b.store) return a.store.localeCompare(b.store);
+    if (a.status !== b.status) return a.status === 'OOS' ? -1 : 1;
+    return a.category.localeCompare(b.category);
+  });
+  const oosTotal = urgent.filter(u => u.status === 'OOS').length;
+  const critTotal = urgent.filter(u => u.status === 'Critical').length;
+  const storesAffected = Object.keys(perStoreCount).length;
+  const urgentRows = urgent.map((u, i) => {
+    const isFirstOfStore = i === 0 || urgent[i-1].store !== u.store;
+    const priorityChip = isFirstOfStore ? (
+      (perStoreOOS[u.store]||0) >= 2 ? '<span style="background:#c33;color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:800;margin-left:6px">HIGH</span>'
+      : (perStoreCount[u.store]||0) >= 3 ? '<span style="background:#e0a020;color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:800;margin-left:6px">MED</span>'
+      : ''
+    ) : '';
+    const opt = STOCK_OPTS.find(o => o.v === u.status);
+    return \`<tr style="\${isFirstOfStore && i>0 ? 'border-top:2px solid #ddd' : ''}">
+      <td style="padding:6px 8px;font-weight:\${isFirstOfStore?'700':'400'};font-size:13px">\${isFirstOfStore ? escapeHtml(u.store)+priorityChip : ''}</td>
+      <td style="padding:6px 8px;color:#556;font-size:12px">\${isFirstOfStore ? escapeHtml(u.manager) : ''}</td>
+      <td style="padding:6px 8px;font-size:13px">\${u.catIcon} \${u.category}</td>
+      <td style="padding:6px 8px;text-align:center"><span style="background:\${opt.bg};color:\${opt.fg};padding:3px 10px;border-radius:12px;font-weight:700;font-size:11px">\${u.status}</span></td>
+      <td style="padding:6px 8px;color:#456;font-size:12px">\${escapeHtml(u.remarks||'')||'<span class="muted">-</span>'}</td>
+    </tr>\`;
+  }).join('');
+  // ---- Merchandising Watchlist (chronic issues across the whole range) ----
+  const perStoreIssue = {};
+  monRes.reports.forEach(r => {
+    STOCK_CATS.forEach(c => {
+      (r.categories[c.name] || []).forEach(e => {
+        const s = perStoreIssue[e.store] = perStoreIssue[e.store] || {
+          store: e.store, manager: r.manager,
+          daysReported: new Set(), daysWithOOS: new Set(), daysWithCrit: new Set(),
+          oosCount: 0, critCount: 0, catBreakdown: {}
+        };
+        s.daysReported.add(r.date);
+        if (e.status === 'OOS')      { s.daysWithOOS.add(r.date);  s.oosCount++;  s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; }
+        if (e.status === 'Critical') { s.daysWithCrit.add(r.date); s.critCount++; s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; }
+      });
+    });
+  });
+  const watchlist = Object.values(perStoreIssue).map(s => {
+    const daysReported = s.daysReported.size;
+    const problemDays  = new Set([...s.daysWithOOS, ...s.daysWithCrit]).size;
+    const rate = daysReported ? Math.round((problemDays / daysReported) * 100) : 0;
+    const topCat = Object.entries(s.catBreakdown).sort((a,b) => b[1] - a[1])[0];
+    return {
+      store: s.store, manager: s.manager,
+      daysReported, problemDays,
+      oosDays: s.daysWithOOS.size, critDays: s.daysWithCrit.size,
+      oosCount: s.oosCount, critCount: s.critCount,
+      rate,
+      topCategory: topCat ? topCat[0] + ' (' + topCat[1] + 'x)' : '-'
+    };
+  }).filter(s => s.problemDays > 0)
+    .sort((a,b) => b.rate - a.rate || b.problemDays - a.problemDays || b.oosCount - a.oosCount || a.store.localeCompare(b.store));
 
-  $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; loadStockTab(); };
+  // Flag stores that need HQ escalation: rate >= 50% OR problemDays >= 3
+  const flaggedStores = watchlist.filter(s => s.rate >= 50 || s.problemDays >= 3);
+
+  // Insert extra KPI tile into KPI row
+  const chronicCard = kpi('&#127919;', flaggedStores.length, 'Chronic Stores', flaggedStores.length ? '#c33' : '#345', 'flag for HQ merch');
+  // Replace kpiRow to include the chronic card at the end
+  const kpiRow2 = \`<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">\${complianceCard}\${oosCard}\${critCard}\${healthyCard}\${onTimeCard}\${chronicCard}</div>\`;
+
+  const rankMedal = (i) => i < 3 ? '#c33' : i < 6 ? '#e0a020' : '#345';
+  const watchRows = watchlist.slice(0, 30).map((s, i) => {
+    const flagged = s.rate >= 50 || s.problemDays >= 3;
+    return \`<tr \${flagged ? 'style="background:#fff5f5"' : ''}>
+      <td style="padding:6px;text-align:center;background:\${rankMedal(i)};color:#fff;font-weight:700;font-size:12px">\${i+1}</td>
+      <td style="padding:6px 8px;font-weight:700;font-size:13px">\${escapeHtml(s.store)}\${flagged ? ' <span style="background:#c33;color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:800;margin-left:4px">FLAG HQ</span>' : ''}</td>
+      <td style="padding:6px 8px;color:#556;font-size:12px">\${escapeHtml(s.manager||'')}</td>
+      <td style="padding:6px;text-align:center;font-size:12px">\${s.daysReported}</td>
+      <td style="padding:6px;text-align:center;color:#c33;font-weight:700;font-size:12px">\${s.problemDays}</td>
+      <td style="padding:6px;text-align:center;color:#c33;font-weight:700;font-size:12px">\${s.oosCount}</td>
+      <td style="padding:6px;text-align:center;color:#b8860b;font-weight:700;font-size:12px">\${s.critCount}</td>
+      <td style="padding:6px 8px;font-size:12px">\${escapeHtml(s.topCategory)}</td>
+      <td style="padding:6px;text-align:right"><span style="background:\${s.rate>=70?'#c33':s.rate>=40?'#e0a020':'#345'};color:#fff;padding:3px 10px;border-radius:12px;font-weight:700;font-size:12px">\${s.rate}%</span></td>
+    </tr>\`;
+  }).join('');
+  const watchCard = \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <h3 style="margin:0;color:#c33">&#128204; Merchandising Watchlist - Chronic OOS &amp; Critical</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px">Ranked by problem rate across the whole date range. <b>FLAG HQ</b> = 50%+ of reported days had issues, OR 3+ problem days. Send this list to merchandising head office.</div>
+    \${watchlist.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#eef">
+        <th style="padding:6px;width:40px;text-align:center">Rank</th>
+        <th style="padding:6px 8px;text-align:left">Store</th>
+        <th style="padding:6px 8px;text-align:left">Area Manager</th>
+        <th style="padding:6px;text-align:center;width:70px">Days Reported</th>
+        <th style="padding:6px;text-align:center;width:70px">Problem Days</th>
+        <th style="padding:6px;text-align:center;width:60px">OOS Instances</th>
+        <th style="padding:6px;text-align:center;width:70px">Critical Instances</th>
+        <th style="padding:6px 8px;text-align:left">Top Category</th>
+        <th style="padding:6px;text-align:right;width:80px">Problem Rate</th>
+      </tr></thead>
+      <tbody>\${watchRows}</tbody></table></div>\` : '<div style="padding:12px;text-align:center;background:#e8f5ec;color:#1f7a3a;font-weight:700;border-radius:6px">No stores with chronic issues in this range.</div>'}
+  </div>\`;
+
+  const urgentCard = \`<div class="card" \${urgent.length ? 'style="border-left:6px solid #c33"' : ''}>
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <h3 style="margin:0;color:#c33">&#128680; Stores Needing Urgent Attention</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${displayDate}</span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="background:#c33;color:#fff;padding:4px 12px;border-radius:8px;font-weight:700;font-size:13px">\${oosTotal} OOS</span>
+      <span style="background:#e0a020;color:#fff;padding:4px 12px;border-radius:8px;font-weight:700;font-size:13px">\${critTotal} Critical</span>
+      <span style="background:#345;color:#fff;padding:4px 12px;border-radius:8px;font-weight:700;font-size:13px">\${storesAffected} store\${storesAffected===1?'':'s'} affected</span>
+    </div>
+    \${urgent.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#eef">
+        <th style="padding:6px 8px;text-align:left">Store</th>
+        <th style="padding:6px 8px;text-align:left">Area Manager</th>
+        <th style="padding:6px 8px;text-align:left">Category</th>
+        <th style="padding:6px 8px;text-align:center;width:90px">Status</th>
+        <th style="padding:6px 8px;text-align:left">Remarks</th>
+      </tr></thead>
+      <tbody>\${urgentRows}</tbody></table></div>\` : '<div style="padding:14px;text-align:center;background:#e8f5ec;color:#1f7a3a;font-weight:700;border-radius:6px">All stores healthy for \${displayDate}. No urgent action needed.</div>'}
+  </div>\`;
+
+  $('#stockOut').innerHTML = kpiRow2 + filterCard + missingHtml + chartCard + formCard + tableCard + urgentCard + watchCard + historyCard;
+
+  $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; STOCK_STATE.singleDate = null; loadStockTab(); };
   $('#stockExportBtn').onclick = exportStockExcel;
+  const sdSel = $('#stockSingleDate'); if (sdSel) sdSel.onchange = () => { STOCK_STATE.singleDate = sdSel.value; loadStockTab(); };
 
   // Wire up form buttons
   if (isAM && STOCK_STATE.amStores.length) {
@@ -2473,6 +2630,14 @@ async function submitStock(){
     });
   });
   if (missing.length) { $('#stockErr').textContent = 'Please select a status for: ' + missing.slice(0,5).join(', ') + (missing.length>5?' and '+(missing.length-5)+' more':''); return; }
+  // Warn if past 10 AM AND this is an update (previous submission exists)
+  const now = new Date();
+  const pastDeadline = (now.getHours() > 10) || (now.getHours() === 10 && now.getMinutes() > 0);
+  const isUpdate = ($('#stockSubmitBtn')||{}).textContent === 'Update Report';
+  if (pastDeadline && isUpdate) {
+    const proceed = confirm('It is already past 10 AM. Updating now will change your badge to LATE. Continue?');
+    if (!proceed) return;
+  }
   const btn = $('#stockSubmitBtn'); btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Submitting...';
   const r = await api('/api/stock-submit', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ manager: S.manager, date: todayStr(), entries }) });

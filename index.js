@@ -879,6 +879,7 @@ const HTML = `<!doctype html>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <title>Fresh Focus 5 - Checklist</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:rgba(0,0,0,0)}
 html,body{overscroll-behavior-y:contain}
@@ -2468,7 +2469,10 @@ async function loadStockTab(){
     </div>
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:8px">
       <div class="muted" style="font-size:12px;flex:1;min-width:200px">Ranked by problem rate across the whole date range. <b>FLAG HQ</b> = 50%+ of reported days had issues, OR 3+ problem days.</div>
-      <button id="watchExportBtn" style="background:#c33">&#128228; Export Flagged Stores to HQ</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button id="watchExportBtn" style="background:#c33">&#128228; Export to Excel (HQ)</button>
+        <button id="watchExportPngBtn" style="background:#345">&#128247; Export Overview PNG</button>
+      </div>
     </div>
     \${watchlist.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:#eef">
@@ -2512,6 +2516,7 @@ async function loadStockTab(){
   $('#stockExportBtn').onclick = exportStockExcel;
   const sdSel = $('#stockSingleDate'); if (sdSel) sdSel.onchange = () => { STOCK_STATE.singleDate = sdSel.value; loadStockTab(); };
   const wexp = $('#watchExportBtn'); if (wexp) wexp.onclick = exportWatchlistHQ;
+  const wexpPng = $('#watchExportPngBtn'); if (wexpPng) wexpPng.onclick = exportWatchlistPNG;
   const wApply = $('#wApplyBtn'); if (wApply) wApply.onclick = () => { STOCK_STATE.wFrom = $('#wFromIn').value; STOCK_STATE.wTo = $('#wToIn').value; loadStockTab(); };
   const wReset = $('#wResetBtn'); if (wReset) wReset.onclick = () => { STOCK_STATE.wFrom = null; STOCK_STATE.wTo = null; loadStockTab(); };
 
@@ -2663,6 +2668,123 @@ function exportStockExcel(){
   a.download = 'Focus5_Stock_Status_' + todayStr() + '.xls';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+async function exportWatchlistPNG(){
+  const data = STOCK_STATE.lastData;
+  const flagged = STOCK_STATE.flaggedStores || [];
+  const wReports = STOCK_STATE.wReports || (data && data.reports) || [];
+  if (!data) { alert('Load first'); return; }
+  if (!flagged.length) { alert('No stores flagged for HQ escalation.'); return; }
+  if (typeof html2canvas === 'undefined') { alert('PNG library still loading. Please try again in a moment.'); return; }
+  const btn = $('#watchExportPngBtn'); const orig = btn ? btn.textContent : ''; if (btn){ btn.disabled = true; btn.textContent = 'Rendering...'; }
+  try {
+    // Build the same overview HTML the Excel export uses, but skipping the detail blocks.
+    const html = buildFlaggedOverviewHTML(data, flagged, wReports);
+    const container = document.createElement('div');
+    container.style.cssText = 'position:absolute;left:-99999px;top:0;background:#fff;padding:20px;width:1600px;font-family:Calibri,Arial,sans-serif';
+    container.innerHTML = html;
+    document.body.appendChild(container);
+    // Wait a tick for browser to paint before capturing
+    await new Promise(r => setTimeout(r, 60));
+    const canvas = await html2canvas(container, { scale: 3, backgroundColor: '#ffffff', useCORS: true, logging: false });
+    document.body.removeChild(container);
+    await new Promise((resolve) => canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'HQ_Escalation_Overview_' + todayStr() + '.png';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      resolve();
+    }, 'image/png'));
+  } catch (e) {
+    alert('PNG export failed: ' + (e && e.message || e));
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
+// Shared overview HTML builder — used by both the Excel export (as embedded block) and PNG export
+function buildFlaggedOverviewHTML(data, flagged, wReports){
+  const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6';
+  const OOS_C = '#c33', CRIT_C = '#e0a020';
+  const isAMRole = (S.level||'').toLowerCase() === 'area manager';
+  const areaLabel = STOCK_STATE.amArea || '';
+  const regionLabel = STOCK_STATE.amRegion || 'CAMANAVA';
+  const titleText = isAMRole
+    ? (areaLabel ? areaLabel + ' Area' : regionLabel) + ' Fresh Focus 5 Categories Stock Status Report'
+    : regionLabel + ' Fresh Focus 5 Categories Stock Status Report';
+  const regionRow = isAMRole ? \`<tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Region</td><td style="padding:6px 12px">\${escapeHtml(regionLabel)}</td></tr>\` : '';
+  const totOOS  = flagged.reduce((n,s) => n+s.oosCount, 0);
+  const totCrit = flagged.reduce((n,s) => n+s.critCount, 0);
+  const reportingDays = new Set(wReports.map(r => r.date)).size;
+  const rangeDatesSorted = [...new Set(wReports.map(r => r.date))].sort();
+  const colorForStatus = (st) => st === 'OOS' ? OOS_C : st === 'Critical' ? CRIT_C : st === 'Healthy' ? DARK : '#dcdcdc';
+  const sparkline = (byDate) => {
+    if (!rangeDatesSorted.length) return '';
+    return \`<div style="margin-top:4px;line-height:0;white-space:nowrap">\${rangeDatesSorted.map(d => '<span style="display:inline-block;width:7px;height:8px;background:'+colorForStatus(byDate?byDate[d]:null)+';margin-right:1px"></span>').join('')}</div>\`;
+  };
+  const catCell = (cs) => {
+    if (!cs || cs.total === 0) return \`<td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:#f0f0f0;color:#888;font-style:italic;font-size:11px">No data\${sparkline(null)}</td>\`;
+    let label, bg;
+    if (cs.oos > 0)        { label = 'With OOS (' + cs.oos + ' Day' + (cs.oos===1?'':'s') + ')'; bg = OOS_C; }
+    else if (cs.crit > 0)  { label = 'With Critical (' + cs.crit + ' Day' + (cs.crit===1?'':'s') + ')'; bg = CRIT_C; }
+    else                   { label = 'Healthy (' + cs.healthy + ' Day' + (cs.healthy===1?'':'s') + ')'; bg = DARK; }
+    return \`<td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${bg};color:#fff;font-weight:bold;font-size:11px">\${label}\${sparkline(cs.byDate)}</td>\`;
+  };
+  const priorityFor = (s) => {
+    if (s.oosCount >= 5 || s.rate >= 80) return { label:'HIGH', bg: OOS_C };
+    if (s.oosCount >= 2 || s.rate >= 50) return { label:'MED',  bg: CRIT_C };
+    return { label:'LOW', bg: DARK };
+  };
+  const overviewRows = flagged.map((s, i) => {
+    const cats = STOCK_CATS.map(c => catCell(s.catSummary && s.catSummary[c.name])).join('');
+    const rateBg = s.rate >= 70 ? OOS_C : s.rate >= 40 ? CRIT_C : DARK;
+    const p = priorityFor(s);
+    return \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${OOS_C};color:#fff;font-weight:bold">\${i+1}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;font-weight:bold;color:\${DARKER};font-size:12px">\${escapeHtml(s.store)}<div style="font-weight:normal;font-size:10px;color:#556;margin-top:2px">\${escapeHtml(s.manager)}</div></td>
+      \${cats}
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${rateBg};color:#fff;font-weight:bold">\${s.rate}%</td>
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${p.bg};color:#fff;font-weight:bold;letter-spacing:.5px">\${p.label}</td>
+    </tr>\`;
+  }).join('');
+  const allStoresInScope = new Set();
+  wReports.forEach(r => STOCK_CATS.forEach(c => (r.categories[c.name]||[]).forEach(e => allStoresInScope.add(e.store))));
+  const totalStoresSeen = allStoresInScope.size;
+  const flaggedPct = totalStoresSeen ? Math.round((flagged.length / totalStoresSeen) * 100) : 0;
+  return \`
+    <div style="padding:14px 4px 4px"><div style="font-size:22px;font-weight:bold;color:\${DARKER};letter-spacing:.3px">\${escapeHtml(titleText)}</div></div>
+    <table style="border-collapse:collapse;margin:8px 0 18px;font-size:12px">
+      \${regionRow}
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Reporting Period</td><td style="padding:6px 12px">\${STOCK_STATE.wFromEffective || STOCK_STATE.from} to \${STOCK_STATE.wToEffective || STOCK_STATE.to}</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Prepared By</td><td style="padding:6px 12px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Generated</td><td style="padding:6px 12px">\${new Date().toLocaleString()}</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Flag Criteria</td><td style="padding:6px 12px">Problem rate &ge; 50% OR 3+ problem days in the period</td></tr>
+    </table>
+    <table style="border-collapse:collapse;margin-bottom:18px;font-size:13px">
+      <tr>
+        <td style="padding:14px 20px;background:\${OOS_C};color:#fff;font-weight:bold;text-align:center;min-width:120px"><div style="font-size:28px">\${flagged.length}</div><div style="font-size:11px;letter-spacing:.5px">STORES FLAGGED</div></td>
+        <td style="padding:14px 20px;background:\${OOS_C};color:#fff;font-weight:bold;text-align:center;min-width:120px"><div style="font-size:28px">\${totOOS}</div><div style="font-size:11px;letter-spacing:.5px">OOS INSTANCES</div></td>
+        <td style="padding:14px 20px;background:\${CRIT_C};color:#fff;font-weight:bold;text-align:center;min-width:120px"><div style="font-size:28px">\${totCrit}</div><div style="font-size:11px;letter-spacing:.5px">CRITICAL INSTANCES</div></td>
+        <td style="padding:14px 20px;background:\${DARK};color:#fff;font-weight:bold;text-align:center;min-width:120px"><div style="font-size:28px">\${reportingDays}</div><div style="font-size:11px;letter-spacing:.5px">REPORTING DAYS</div><div style="font-size:10px;opacity:.85;font-weight:normal;margin-top:2px">calendar days covered by this report</div></td>
+      </tr>
+    </table>
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;font-weight:bold;font-size:14px;letter-spacing:.3px">FLAGGED STORES OVERVIEW</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 4px">Each category cell shows the worst status recorded in the period, with the number of days at that status. Priority column combines OOS count and problem rate. Sorted worst first.</div>
+    <div style="margin:4px 0 6px;font-size:10px;color:#556">Sparkline bars = each reported day in the range, oldest to newest. <span style="display:inline-block;width:8px;height:8px;background:\${OOS_C};vertical-align:-1px;margin:0 3px"></span>OOS <span style="display:inline-block;width:8px;height:8px;background:\${CRIT_C};vertical-align:-1px;margin:0 3px"></span>Critical <span style="display:inline-block;width:8px;height:8px;background:\${DARK};vertical-align:-1px;margin:0 3px"></span>Healthy <span style="display:inline-block;width:8px;height:8px;background:#dcdcdc;vertical-align:-1px;margin:0 3px"></span>No data</div>
+    \${totalStoresSeen ? '<div style="margin:6px 0 14px;padding:8px 12px;background:'+LIGHT_BG+';border-left:4px solid '+DARK+';font-size:12px;color:'+DARKER+'"><b>'+flagged.length+'</b> of <b>'+totalStoresSeen+'</b> stores flagged for HQ escalation in this period (<b>'+flaggedPct+'%</b>). Remaining '+(totalStoresSeen - flagged.length)+' store(s) either meet compliance or had only isolated issues.</div>' : ''}
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:22px">
+      <thead><tr>
+        <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:40px;font-size:13px">#</th>
+        <th style="background:\${DARKER};color:#fff;padding:10px 12px;border:2px solid \${DARKER};font-weight:bold;text-align:left;width:180px;font-size:13px">Store</th>
+        \${STOCK_CATS.map(c => \`<th style="background:#fff8e1;color:\${DARKER};padding:12px 8px;border:2px solid \${CRIT_C};font-weight:bold;text-align:center;width:140px;font-size:15px">\${c.icon} \${c.name}</th>\`).join('')}
+        <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:90px;font-size:13px">Problem Rate</th>
+        <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:80px;font-size:13px">Priority</th>
+      </tr></thead>
+      <tbody>\${overviewRows}</tbody>
+    </table>\`;
 }
 
 function exportWatchlistHQ(){

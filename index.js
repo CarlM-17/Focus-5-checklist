@@ -2385,8 +2385,9 @@ async function loadStockTab(){
           perCat: {} // { Rice: { oosDays:Set, critDays:Set, healthyDays:Set, allDays:Set } }
         };
         s.daysReported.add(r.date);
-        const pc = s.perCat[c.name] = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set() };
+        const pc = s.perCat[c.name] = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set(), byDate:{} };
         pc.allDays.add(r.date);
+        pc.byDate[r.date] = e.status; // for sparkline
         if (e.status === 'OOS')      { s.daysWithOOS.add(r.date);  s.oosCount++;  s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; pc.oosDays.add(r.date); }
         else if (e.status === 'Critical') { s.daysWithCrit.add(r.date); s.critCount++; s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; pc.critDays.add(r.date); }
         else if (e.status === 'Healthy')  { pc.healthyDays.add(r.date); }
@@ -2401,8 +2402,8 @@ async function loadStockTab(){
     // Per-category summary: { Rice: {oos, crit, healthy, total}, ... }
     const catSummary = {};
     STOCK_CATS.forEach(c => {
-      const pc = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set() };
-      catSummary[c.name] = { oos: pc.oosDays.size, crit: pc.critDays.size, healthy: pc.healthyDays.size, total: pc.allDays.size };
+      const pc = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set(), byDate:{} };
+      catSummary[c.name] = { oos: pc.oosDays.size, crit: pc.critDays.size, healthy: pc.healthyDays.size, total: pc.allDays.size, byDate: pc.byDate };
     });
     return {
       store: s.store, manager: s.manager,
@@ -2713,23 +2714,65 @@ function exportWatchlistHQ(){
       </tr>
     </table>\`;
 
-  // Flagged stores overview table
+  // Flagged stores overview - simplified store x category matrix
   const th = (t, w) => \`<th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER};font-weight:bold;text-align:left;\${w?'width:'+w:''}">\${t}</th>\`;
-  const overviewRows = flagged.map((s, i) => \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${OOS_C};color:#fff;font-weight:bold">\${i+1}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;font-weight:bold;color:\${DARKER}">\${escapeHtml(s.store)}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px">\${escapeHtml(s.manager)}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center">\${s.daysReported}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${OOS_C};font-weight:bold">\${s.problemDays}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${OOS_C};font-weight:bold">\${s.oosCount}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;color:\${CRIT_C};font-weight:bold">\${s.critCount}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px">\${escapeHtml(s.topCategory)}</td>
-    <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${s.rate>=70?OOS_C:CRIT_C};color:#fff;font-weight:bold">\${s.rate}%</td>
-  </tr>\`).join('');
+  // Build the full ordered date list across the whole watchlist range for sparklines
+  const rangeDatesSet = new Set();
+  wReports.forEach(r => rangeDatesSet.add(r.date));
+  const rangeDatesSorted = [...rangeDatesSet].sort(); // oldest -> newest
+  const colorForStatus = (st) => st === 'OOS' ? OOS_C : st === 'Critical' ? CRIT_C : st === 'Healthy' ? DARK : '#dcdcdc';
+  const sparkline = (byDate) => {
+    if (!rangeDatesSorted.length) return '';
+    const bars = rangeDatesSorted.map(d => {
+      const st = byDate ? byDate[d] : null;
+      return \`<span style="display:inline-block;width:7px;height:8px;background:\${colorForStatus(st)};margin-right:1px"></span>\`;
+    }).join('');
+    return \`<div style="margin-top:4px;line-height:0;white-space:nowrap">\${bars}</div>\`;
+  };
+  const catCell = (cs) => {
+    if (!cs || cs.total === 0) {
+      return \`<td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:#f0f0f0;color:#888;font-style:italic;font-size:11px">No data\${sparkline(null)}</td>\`;
+    }
+    let label, bg, fg = '#fff';
+    if (cs.oos > 0)      { label = 'With OOS ('      + cs.oos     + ' Day' + (cs.oos===1?'':'s')     + ')'; bg = OOS_C; }
+    else if (cs.crit > 0){ label = 'With Critical (' + cs.crit    + ' Day' + (cs.crit===1?'':'s')    + ')'; bg = CRIT_C; }
+    else                 { label = 'Healthy ('       + cs.healthy + ' Day' + (cs.healthy===1?'':'s') + ')'; bg = DARK; }
+    return \`<td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${bg};color:\${fg};font-weight:bold;font-size:11px">\${label}\${sparkline(cs.byDate)}</td>\`;
+  };
+  const priorityFor = (s) => {
+    if (s.oosCount >= 5 || s.rate >= 80) return { label:'HIGH', bg: OOS_C };
+    if (s.oosCount >= 2 || s.rate >= 50) return { label:'MED',  bg: CRIT_C };
+    return { label:'LOW', bg: DARK };
+  };
+  const overviewRows = flagged.map((s, i) => {
+    const catCells = STOCK_CATS.map(c => catCell(s.catSummary && s.catSummary[c.name])).join('');
+    const rateBg = s.rate >= 70 ? OOS_C : s.rate >= 40 ? CRIT_C : DARK;
+    const p = priorityFor(s);
+    return \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${OOS_C};color:#fff;font-weight:bold">\${i+1}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;font-weight:bold;color:\${DARKER};font-size:12px">\${escapeHtml(s.store)}<div style="font-weight:normal;font-size:10px;color:#556;margin-top:2px">\${escapeHtml(s.manager)}</div></td>
+      \${catCells}
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${rateBg};color:#fff;font-weight:bold">\${s.rate}%</td>
+      <td style="border:1px solid #cfd8d3;padding:6px 10px;text-align:center;background:\${p.bg};color:#fff;font-weight:bold;letter-spacing:.5px">\${p.label}</td>
+    </tr>\`;
+  }).join('');
+
+  // Store count summary
+  const allStoresInScope = new Set();
+  wReports.forEach(r => STOCK_CATS.forEach(c => (r.categories[c.name]||[]).forEach(e => allStoresInScope.add(e.store))));
+  const totalStoresSeen = allStoresInScope.size;
+  const flaggedPct = totalStoresSeen ? Math.round((flagged.length / totalStoresSeen) * 100) : 0;
+  const summaryLine = totalStoresSeen ? \`<div style="margin:6px 0 14px;padding:8px 12px;background:\${LIGHT_BG};border-left:4px solid \${DARK};font-size:12px;color:\${DARKER}"><b>\${flagged.length}</b> of <b>\${totalStoresSeen}</b> stores flagged for HQ escalation in this period (<b>\${flaggedPct}%</b>). Remaining \${totalStoresSeen - flagged.length} store(s) either meet compliance or had only isolated issues.</div>\` : '';
+
+  const legendLine = \`<div style="margin:4px 0 6px;font-size:10px;color:#556">Sparkline bars = each reported day in the range, oldest to newest. <span style="display:inline-block;width:8px;height:8px;background:\${OOS_C};vertical-align:-1px;margin:0 3px"></span>OOS <span style="display:inline-block;width:8px;height:8px;background:\${CRIT_C};vertical-align:-1px;margin:0 3px"></span>Critical <span style="display:inline-block;width:8px;height:8px;background:\${DARK};vertical-align:-1px;margin:0 3px"></span>Healthy <span style="display:inline-block;width:8px;height:8px;background:#dcdcdc;vertical-align:-1px;margin:0 3px"></span>No data</div>\`;
+
   const overviewBlock = \`
     <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">FLAGGED STORES OVERVIEW</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 4px">Each category cell shows the worst status recorded in the period, with the number of days at that status. Priority column combines OOS count and problem rate. Sorted worst first.</div>
+    \${legendLine}
+    \${summaryLine}
     <table style="border-collapse:collapse;font-size:12px;margin-bottom:22px">
-      <thead><tr>\${th('#','40px')}\${th('Store','160px')}\${th('Area Manager','120px')}\${th('Days Reported','70px')}\${th('Problem Days','70px')}\${th('OOS Instances','80px')}\${th('Critical Instances','80px')}\${th('Top Category','140px')}\${th('Problem Rate','80px')}</tr></thead>
+      <thead><tr>\${th('#','40px')}\${th('Store','160px')}\${STOCK_CATS.map(c => th(c.name,'120px')).join('')}\${th('Problem Rate','80px')}\${th('Priority','70px')}</tr></thead>
       <tbody>\${overviewRows}</tbody>
     </table>\`;
 

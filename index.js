@@ -2796,7 +2796,15 @@ function exportWatchlistHQ(){
     \${legendLine}
     \${summaryLine}
     <table style="border-collapse:collapse;font-size:12px;margin-bottom:22px">
-      <thead><tr>\${th('#','40px')}\${th('Store','160px')}\${STOCK_CATS.map(c => th(c.name,'120px')).join('')}\${th('Problem Rate','80px')}\${th('Priority','70px')}</tr></thead>
+      <thead>
+        <tr>
+          <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:40px;font-size:13px">#</th>
+          <th style="background:\${DARKER};color:#fff;padding:10px 12px;border:2px solid \${DARKER};font-weight:bold;text-align:left;width:180px;font-size:13px">Store</th>
+          \${STOCK_CATS.map(c => \`<th style="background:#fff8e1;color:\${DARKER};padding:12px 8px;border:2px solid \${CRIT_C};font-weight:bold;text-align:center;width:140px;font-size:15px">\${c.icon} \${c.name}</th>\`).join('')}
+          <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:90px;font-size:13px">Problem Rate</th>
+          <th style="background:\${DARKER};color:#fff;padding:10px 8px;border:2px solid \${DARKER};font-weight:bold;text-align:center;width:80px;font-size:13px">Priority</th>
+        </tr>
+      </thead>
       <tbody>\${overviewRows}</tbody>
     </table>\`;
 

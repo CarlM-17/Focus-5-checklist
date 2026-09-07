@@ -2682,12 +2682,14 @@ async function exportWatchlistPNG(){
     // Build the same overview HTML the Excel export uses, but skipping the detail blocks.
     const html = buildFlaggedOverviewHTML(data, flagged, wReports);
     const container = document.createElement('div');
-    container.style.cssText = 'position:absolute;left:-99999px;top:0;background:#fff;padding:20px;width:1600px;font-family:Calibri,Arial,sans-serif';
+    // display:inline-block + width:max-content so the box shrinks to fit the widest table (no trailing white space)
+    container.style.cssText = 'position:absolute;left:-99999px;top:0;background:#fff;padding:20px;display:inline-block;width:max-content;font-family:Calibri,Arial,sans-serif';
     container.innerHTML = html;
     document.body.appendChild(container);
-    // Wait a tick for browser to paint before capturing
     await new Promise(r => setTimeout(r, 60));
-    const canvas = await html2canvas(container, { scale: 3, backgroundColor: '#ffffff', useCORS: true, logging: false });
+    // Explicit width/height so html2canvas doesn't grab the whole viewport width
+    const rect = container.getBoundingClientRect();
+    const canvas = await html2canvas(container, { scale: 3, backgroundColor: '#ffffff', useCORS: true, logging: false, width: Math.ceil(rect.width), height: Math.ceil(rect.height), windowWidth: Math.ceil(rect.width) + 40 });
     document.body.removeChild(container);
     await new Promise((resolve) => canvas.toBlob((blob) => {
       const url = URL.createObjectURL(blob);

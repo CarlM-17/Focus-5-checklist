@@ -2421,6 +2421,9 @@ async function loadStockTab(){
   const flaggedStores = watchlist.filter(s => s.rate >= 50 || s.problemDays >= 3);
   STOCK_STATE.watchlist = watchlist;
   STOCK_STATE.flaggedStores = flaggedStores;
+  STOCK_STATE.wReports = wReports;
+  STOCK_STATE.wFromEffective = wFrom;
+  STOCK_STATE.wToEffective = wTo;
 
   // Insert extra KPI tile into KPI row
   const chronicCard = kpi('&#127919;', flaggedStores.length, 'Chronic Stores', flaggedStores.length ? '#c33' : '#345', 'flag for HQ merch');
@@ -2655,15 +2658,16 @@ function exportStockExcel(){
 function exportWatchlistHQ(){
   const data = STOCK_STATE.lastData;
   const flagged = STOCK_STATE.flaggedStores || [];
+  const wReports = STOCK_STATE.wReports || (data && data.reports) || [];
   if (!data) { alert('Load first'); return; }
   if (!flagged.length) { alert('No stores flagged for HQ escalation in this range.'); return; }
 
   const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6';
   const OOS_C = '#c33', CRIT_C = '#e0a020';
 
-  // Build per-store detailed incident list from reports in the range
+  // Build per-store detailed incident list from reports in the watchlist range
   const incidentsByStore = {};
-  data.reports.forEach(r => {
+  wReports.forEach(r => {
     STOCK_CATS.forEach(c => {
       (r.categories[c.name]||[]).forEach(e => {
         if (e.status !== 'OOS' && e.status !== 'Critical') return;
@@ -2681,7 +2685,7 @@ function exportWatchlistHQ(){
       <div style="font-size:14px;opacity:.92;margin-top:4px">Focus 5 Stock Status - Stores Flagged for HQ Review</div>
     </div>
     <table style="border-collapse:collapse;margin:0 0 18px;font-size:12px">
-      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Reporting Period</td><td style="padding:6px 12px">\${STOCK_STATE.from} to \${STOCK_STATE.to}</td></tr>
+      <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Reporting Period</td><td style="padding:6px 12px">\${STOCK_STATE.wFromEffective || STOCK_STATE.from} to \${STOCK_STATE.wToEffective || STOCK_STATE.to}</td></tr>
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Prepared By</td><td style="padding:6px 12px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Generated</td><td style="padding:6px 12px">\${new Date().toLocaleString()}</td></tr>
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Flag Criteria</td><td style="padding:6px 12px">Problem rate &ge; 50% OR 3+ problem days in the period</td></tr>

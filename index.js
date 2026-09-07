@@ -2694,7 +2694,8 @@ function exportWatchlistHQ(){
   // Executive KPIs
   const totOOS = flagged.reduce((n,s) => n+s.oosCount, 0);
   const totCrit = flagged.reduce((n,s) => n+s.critCount, 0);
-  const totProbDays = flagged.reduce((n,s) => n+s.problemDays, 0);
+  // Number of unique calendar days in the watchlist range that had any report
+  const reportingDays = new Set(wReports.map(r => r.date)).size;
   const kpiBlock = \`
     <table style="border-collapse:collapse;margin-bottom:18px;font-size:13px">
       <tr>
@@ -2711,9 +2712,9 @@ function exportWatchlistHQ(){
           <div style="font-size:11px;letter-spacing:.5px">CRITICAL INSTANCES</div>
         </td>
         <td style="padding:14px 20px;background:\${DARK};color:#fff;font-weight:bold;text-align:center;min-width:120px">
-          <div style="font-size:28px">\${totProbDays}</div>
-          <div style="font-size:11px;letter-spacing:.5px">STORE-DAYS AFFECTED</div>
-          <div style="font-size:10px;opacity:.85;font-weight:normal;margin-top:2px">sum of problem days across flagged stores</div>
+          <div style="font-size:28px">\${reportingDays}</div>
+          <div style="font-size:11px;letter-spacing:.5px">REPORTING DAYS</div>
+          <div style="font-size:10px;opacity:.85;font-weight:normal;margin-top:2px">calendar days covered by this report</div>
         </td>
       </tr>
     </table>\`;

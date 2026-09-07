@@ -2067,7 +2067,7 @@ const STOCK_OPTS = [
   { v: 'Critical', lbl: 'Critical', bg: '#e0a020', fg: '#fff' },
   { v: 'Healthy',  lbl: 'Healthy',  bg: '#1f7a3a', fg: '#fff' },
 ];
-let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null, amStores: [], singleDate: null };
+let STOCK_STATE = { entries: {}, from: null, to: null, expanded: {}, lastData: null, amStores: [], singleDate: null, wFrom: null, wTo: null };
 
 async function loadStockTab(){
   const level = (S.level||'').toLowerCase();
@@ -2365,19 +2365,31 @@ async function loadStockTab(){
       <td style="padding:6px 8px;color:#456;font-size:12px">\${escapeHtml(u.remarks||'')||'<span class="muted">-</span>'}</td>
     </tr>\`;
   }).join('');
-  // ---- Merchandising Watchlist (chronic issues across the whole range) ----
+  // ---- Merchandising Watchlist (chronic issues) ----
+  // Watchlist has its OWN date range that defaults to the full monRes range.
+  const allWatchDates = [...new Set(monRes.reports.map(r => r.date))].sort();
+  const defaultWFrom = allWatchDates[0] || STOCK_STATE.from;
+  const defaultWTo   = allWatchDates[allWatchDates.length-1] || STOCK_STATE.to;
+  const wFrom = STOCK_STATE.wFrom || defaultWFrom;
+  const wTo   = STOCK_STATE.wTo   || defaultWTo;
+  const wReports = monRes.reports.filter(r => (!wFrom || r.date >= wFrom) && (!wTo || r.date <= wTo));
   const perStoreIssue = {};
-  monRes.reports.forEach(r => {
+  // Track per-category status day sets so we can compute OOS/Critical/Healthy day counts per category
+  wReports.forEach(r => {
     STOCK_CATS.forEach(c => {
       (r.categories[c.name] || []).forEach(e => {
         const s = perStoreIssue[e.store] = perStoreIssue[e.store] || {
           store: e.store, manager: r.manager,
           daysReported: new Set(), daysWithOOS: new Set(), daysWithCrit: new Set(),
-          oosCount: 0, critCount: 0, catBreakdown: {}
+          oosCount: 0, critCount: 0, catBreakdown: {},
+          perCat: {} // { Rice: { oosDays:Set, critDays:Set, healthyDays:Set, allDays:Set } }
         };
         s.daysReported.add(r.date);
-        if (e.status === 'OOS')      { s.daysWithOOS.add(r.date);  s.oosCount++;  s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; }
-        if (e.status === 'Critical') { s.daysWithCrit.add(r.date); s.critCount++; s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; }
+        const pc = s.perCat[c.name] = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set() };
+        pc.allDays.add(r.date);
+        if (e.status === 'OOS')      { s.daysWithOOS.add(r.date);  s.oosCount++;  s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; pc.oosDays.add(r.date); }
+        else if (e.status === 'Critical') { s.daysWithCrit.add(r.date); s.critCount++; s.catBreakdown[c.name] = (s.catBreakdown[c.name]||0) + 1; pc.critDays.add(r.date); }
+        else if (e.status === 'Healthy')  { pc.healthyDays.add(r.date); }
       });
     });
   });
@@ -2386,13 +2398,20 @@ async function loadStockTab(){
     const problemDays  = new Set([...s.daysWithOOS, ...s.daysWithCrit]).size;
     const rate = daysReported ? Math.round((problemDays / daysReported) * 100) : 0;
     const topCat = Object.entries(s.catBreakdown).sort((a,b) => b[1] - a[1])[0];
+    // Per-category summary: { Rice: {oos, crit, healthy, total}, ... }
+    const catSummary = {};
+    STOCK_CATS.forEach(c => {
+      const pc = s.perCat[c.name] || { oosDays:new Set(), critDays:new Set(), healthyDays:new Set(), allDays:new Set() };
+      catSummary[c.name] = { oos: pc.oosDays.size, crit: pc.critDays.size, healthy: pc.healthyDays.size, total: pc.allDays.size };
+    });
     return {
       store: s.store, manager: s.manager,
       daysReported, problemDays,
       oosDays: s.daysWithOOS.size, critDays: s.daysWithCrit.size,
       oosCount: s.oosCount, critCount: s.critCount,
       rate,
-      topCategory: topCat ? topCat[0] + ' (' + topCat[1] + 'x)' : '-'
+      topCategory: topCat ? topCat[0] + ' (' + topCat[1] + 'x)' : '-',
+      catSummary
     };
   }).filter(s => s.problemDays > 0)
     .sort((a,b) => b.rate - a.rate || b.problemDays - a.problemDays || b.oosCount - a.oosCount || a.store.localeCompare(b.store));
@@ -2425,7 +2444,13 @@ async function loadStockTab(){
   const watchCard = \`<div class="card">
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
       <h3 style="margin:0;color:#c33">&#128204; Merchandising Watchlist - Chronic OOS &amp; Critical</h3>
-      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${STOCK_STATE.from} to \${STOCK_STATE.to}</span>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${wFrom} to \${wTo}</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;padding:8px 10px;background:#f4faf6;border-radius:6px">
+      <div><label style="display:block;font-size:11px;color:#556;margin-bottom:2px">Watchlist From</label><input id="wFromIn" type="date" value="\${wFrom}" style="padding:6px 8px;border:1px solid #ccd;border-radius:6px;font-size:12px"/></div>
+      <div><label style="display:block;font-size:11px;color:#556;margin-bottom:2px">Watchlist To</label><input id="wToIn" type="date" value="\${wTo}" style="padding:6px 8px;border:1px solid #ccd;border-radius:6px;font-size:12px"/></div>
+      <button id="wApplyBtn" style="padding:8px 14px">Apply</button>
+      <button id="wResetBtn" class="ghost" style="padding:8px 14px">Reset (all dates)</button>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:8px">
       <div class="muted" style="font-size:12px;flex:1;min-width:200px">Ranked by problem rate across the whole date range. <b>FLAG HQ</b> = 50%+ of reported days had issues, OR 3+ problem days.</div>
@@ -2473,6 +2498,8 @@ async function loadStockTab(){
   $('#stockExportBtn').onclick = exportStockExcel;
   const sdSel = $('#stockSingleDate'); if (sdSel) sdSel.onchange = () => { STOCK_STATE.singleDate = sdSel.value; loadStockTab(); };
   const wexp = $('#watchExportBtn'); if (wexp) wexp.onclick = exportWatchlistHQ;
+  const wApply = $('#wApplyBtn'); if (wApply) wApply.onclick = () => { STOCK_STATE.wFrom = $('#wFromIn').value; STOCK_STATE.wTo = $('#wToIn').value; loadStockTab(); };
+  const wReset = $('#wResetBtn'); if (wReset) wReset.onclick = () => { STOCK_STATE.wFrom = null; STOCK_STATE.wTo = null; loadStockTab(); };
 
   // Wire up form buttons
   if (isAM && STOCK_STATE.amStores.length) {
@@ -2680,7 +2707,8 @@ function exportWatchlistHQ(){
         </td>
         <td style="padding:14px 20px;background:\${DARK};color:#fff;font-weight:bold;text-align:center;min-width:120px">
           <div style="font-size:28px">\${totProbDays}</div>
-          <div style="font-size:11px;letter-spacing:.5px">PROBLEM DAYS</div>
+          <div style="font-size:11px;letter-spacing:.5px">STORE-DAYS AFFECTED</div>
+          <div style="font-size:10px;opacity:.85;font-weight:normal;margin-top:2px">sum of problem days across flagged stores</div>
         </td>
       </tr>
     </table>\`;
@@ -2705,22 +2733,51 @@ function exportWatchlistHQ(){
       <tbody>\${overviewRows}</tbody>
     </table>\`;
 
-  // Detailed findings per store
-  const detailBlocks = flagged.map(s => {
+  // Detailed findings per store — per-category summary + incident log
+  const detailBlocks = flagged.map((s, idx) => {
     const incs = incidentsByStore[s.store] || [];
+    // Per-category day-count summary
+    const catSumRows = STOCK_CATS.map(c => {
+      const cs = (s.catSummary && s.catSummary[c.name]) || { oos:0, crit:0, healthy:0, total:0 };
+      const worstBg = cs.oos > 0 ? OOS_C : cs.crit > 0 ? CRIT_C : DARK;
+      const isFlagged = cs.oos > 0 || cs.crit > 0;
+      return \`<tr style="background:\${isFlagged ? '#fff5f5' : LIGHTER}">
+        <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold">\${c.name}</td>
+        <td style="border:1px solid #cfd8d3;padding:5px;text-align:center;\${cs.oos>0?'background:'+OOS_C+';color:#fff;font-weight:bold':'color:#888'}">\${cs.oos}</td>
+        <td style="border:1px solid #cfd8d3;padding:5px;text-align:center;\${cs.crit>0?'background:'+CRIT_C+';color:#fff;font-weight:bold':'color:#888'}">\${cs.crit}</td>
+        <td style="border:1px solid #cfd8d3;padding:5px;text-align:center;\${cs.healthy>0?'background:'+DARK+';color:#fff;font-weight:bold':'color:#888'}">\${cs.healthy}</td>
+        <td style="border:1px solid #cfd8d3;padding:5px;text-align:center;font-weight:bold">\${cs.total}</td>
+      </tr>\`;
+    }).join('');
     const incRows = incs.map((inc, i) => \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
       <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.date)}</td>
       <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.category)}</td>
       <td style="border:1px solid #cfd8d3;padding:5px 10px;text-align:center;background:\${inc.status==='OOS'?OOS_C:CRIT_C};color:#fff;font-weight:bold;font-size:11px">\${inc.status}</td>
       <td style="border:1px solid #cfd8d3;padding:5px 10px">\${escapeHtml(inc.remarks) || '<span style=\"color:#888;font-style:italic\">no remarks</span>'}</td>
     </tr>\`).join('');
+    const noRows = \`<tr><td colspan="4" style="padding:8px 10px;color:#666;font-style:italic;border:1px solid #cfd8d3">No detailed incidents recorded.</td></tr>\`;
     return \`
-      <div style="background:\${DARKER};color:#fff;padding:8px 12px;margin-top:14px;font-weight:bold;font-size:13px;letter-spacing:.3px">
-        \${escapeHtml(s.store)} <span style="opacity:.85;font-weight:normal;font-size:11px;margin-left:8px">- \${escapeHtml(s.manager)} | \${s.problemDays}/\${s.daysReported} problem days (\${s.rate}%)</span>
-      </div>
-      <table style="border-collapse:collapse;font-size:12px;margin-bottom:10px;width:100%">
-        <thead><tr>\${th('Date','90px')}\${th('Category','100px')}\${th('Status','60px')}\${th('Remarks / Details')}</tr></thead>
-        <tbody>\${incRows || '<tr><td colspan="4" style="padding:8px 10px;color:#666;font-style:italic">No detailed incidents recorded.</td></tr>'}</tbody>
+      <table style="border-collapse:collapse;font-size:12px;margin:18px 0 4px;width:100%">
+        <tr>
+          <td colspan="5" style="background:\${DARKER};color:#fff;padding:10px 12px;font-weight:bold;font-size:14px;border:1px solid \${DARKER}">
+            \${idx+1}. \${escapeHtml(s.store)}
+            <span style="opacity:.9;font-weight:normal;font-size:11px;margin-left:10px">
+              Area Manager: \${escapeHtml(s.manager)} &nbsp;|&nbsp; \${s.problemDays}/\${s.daysReported} problem days (\${s.rate}%) &nbsp;|&nbsp; OOS \${s.oosCount} &nbsp;|&nbsp; Critical \${s.critCount}
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="5" style="padding:6px 10px;background:#eef;font-weight:bold;font-size:11px;color:\${DARKER};border:1px solid #cfd8d3">CATEGORY SUMMARY (day counts)</td>
+        </tr>
+        <tr>\${th('Category','110px')}\${th('OOS Days','70px')}\${th('Critical Days','80px')}\${th('Healthy Days','80px')}\${th('Total Days Reported','90px')}</tr>
+        \${catSumRows}
+      </table>
+      <table style="border-collapse:collapse;font-size:12px;margin:2px 0 4px;width:100%">
+        <tr>
+          <td colspan="4" style="padding:6px 10px;background:#eef;font-weight:bold;font-size:11px;color:\${DARKER};border:1px solid #cfd8d3">INCIDENT LOG (\${incs.length} entries)</td>
+        </tr>
+        <tr>\${th('Date','90px')}\${th('Category','110px')}\${th('Status','70px')}\${th('Remarks / Details')}</tr>
+        \${incRows || noRows}
       </table>\`;
   }).join('');
 

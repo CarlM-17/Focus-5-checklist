@@ -1847,10 +1847,11 @@ async function loadMonitor(){
       <td style="padding:4px 2px;text-align:center;background:\${cellBg(rd.avg)};color:\${cellCol(rd.avg)};font-weight:800;border:1px solid #eee;font-size:12px">\${rd.avg===null?'&mdash;':(rd.avg+'%')}</td>
     </tr>\`;
   }).join('');
-  const weeklyRankCard = (weeksR.length && rankData.length) ? \`<div class="card">
+  const weeklyRankCard = (weeksR.length && rankData.length) ? \`<div class="card" id="weeklyRankCard">
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px">
       <h3 style="margin:0;color:#1f7a3a">Weekly Ranking - Per Store</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">Lowest &rarr; Highest by Avg</span>
+      <button id="wkRankPngBtn" data-no-png style="margin-left:auto;background:#345;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:600;font-size:13px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1)">&#128247; Export PNG</button>
     </div>
     <div style="margin-bottom:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:13px;line-height:1.55;color:#5a4300">
       <b style="color:#a06800">NOTE TO ALL STORES:</b>
@@ -1923,6 +1924,31 @@ async function loadMonitor(){
         <tbody>\${itemRows||'<tr><td colspan="5" style="padding:10px;text-align:center;color:#789">No data</td></tr>'}</tbody></table></div></div>\`
     + detailHtml;
   if (selStore) { loadMonRecent(selStore); }
+  const wkBtn = document.getElementById('wkRankPngBtn'); if (wkBtn) wkBtn.onclick = exportWeeklyRankPNG;
+}
+
+async function exportWeeklyRankPNG(){
+  const el = document.getElementById('weeklyRankCard');
+  if (!el) { alert('Nothing to export'); return; }
+  if (typeof html2canvas === 'undefined') { alert('PNG library still loading. Try again in a moment.'); return; }
+  const btn = document.getElementById('wkRankPngBtn'); const orig = btn ? btn.textContent : ''; if (btn) { btn.disabled = true; btn.textContent = 'Rendering...'; }
+  try {
+    const canvas = await html2canvas(el, { scale: 3, backgroundColor: '#ffffff', useCORS: true, logging: false,
+      ignoreElements: (n) => n && n.hasAttribute && n.hasAttribute('data-no-png') });
+    await new Promise((resolve) => canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Weekly_Ranking_' + todayStr() + '.png';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      resolve();
+    }, 'image/png'));
+  } catch (e) {
+    alert('PNG export failed: ' + (e && e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
 }
 
 async function loadMonComplog(store){

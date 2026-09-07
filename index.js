@@ -683,6 +683,8 @@ const STOCK_STATUSES   = ['OOS','Critical','Healthy'];
 // Days BEFORE this date are ignored by streak, on-time/late/missed counts, and KPIs.
 // Change this value to reset the rollout, or set to '' to disable.
 const STOCK_ROLLOUT = process.env.STOCK_ROLLOUT || '2026-09-05';
+// Region label used in report titles. Change here or set env REGION_NAME.
+const REGION_NAME = process.env.REGION_NAME || 'CAMANAVA';
 
 async function markStockEdited(manager, date, newId) {
   const rows = await sheetsGet('StockStatus!A2:I');
@@ -852,11 +854,17 @@ app.get('/api/am-stores', async (req, res) => {
     const manager = (req.query.manager || '').trim().toLowerCase();
     if (!manager) return res.json({ ok:false, error:'manager required' });
     const rows = await sheetsGet('ListOfStores!A2:G');
-    const stores = rows
-      .filter(r => (r[6] || '').trim().toLowerCase() === manager)
-      .map(r => r[4])
-      .filter(Boolean);
-    res.json({ ok: true, stores });
+    const mine = rows.filter(r => (r[6] || '').trim().toLowerCase() === manager);
+    const stores = mine.map(r => r[4]).filter(Boolean);
+    // Most common area for this AM
+    const areaCounts = {};
+    mine.forEach(r => { const a = (r[2]||'').trim(); if (a) areaCounts[a] = (areaCounts[a]||0)+1; });
+    const primaryArea = Object.entries(areaCounts).sort((a,b) => b[1]-a[1])[0];
+    // Most common region for this AM
+    const regionCounts = {};
+    mine.forEach(r => { const g = (r[1]||'').trim(); if (g) regionCounts[g] = (regionCounts[g]||0)+1; });
+    const primaryRegion = Object.entries(regionCounts).sort((a,b) => b[1]-a[1])[0];
+    res.json({ ok: true, stores, area: primaryArea ? primaryArea[0] : '', region: primaryRegion ? primaryRegion[0] : REGION_NAME });
   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
 });
 
@@ -2083,6 +2091,8 @@ async function loadStockTab(){
     isAM ? api('/api/am-stores?manager=' + encodeURIComponent(S.manager)) : Promise.resolve({ ok:true, stores: [] })
   ]);
   STOCK_STATE.amStores = (storesRes.stores || []);
+  STOCK_STATE.amArea   = storesRes.area || S.area || '';
+  STOCK_STATE.amRegion = storesRes.region || 'CAMANAVA';
   if (!monRes.ok){ $('#stockOut').innerHTML = '<div class="card err">'+escapeHtml(monRes.error||'Failed')+'</div>'; return; }
   STOCK_STATE.lastData = monRes;
   const k = monRes.kpis;
@@ -2678,13 +2688,22 @@ function exportWatchlistHQ(){
   });
   Object.values(incidentsByStore).forEach(list => list.sort((a,b) => b.date.localeCompare(a.date) || (a.status==='OOS'?-1:1)));
 
-  // Cover header
+  // Title based on role: AM shows "<Area> Area" with Region subrow; RM shows "<Region>"
+  const isAMRole = (S.level||'').toLowerCase() === 'area manager';
+  const areaLabel = STOCK_STATE.amArea || '';
+  const regionLabel = STOCK_STATE.amRegion || 'CAMANAVA';
+  const titleText = isAMRole
+    ? (areaLabel ? areaLabel + ' Area' : regionLabel) + ' Fresh Focus 5 Categories Stock Status Report'
+    : regionLabel + ' Fresh Focus 5 Categories Stock Status Report';
+  const regionRow = isAMRole
+    ? \`<tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Region</td><td style="padding:6px 12px">\${escapeHtml(regionLabel)}</td></tr>\`
+    : '';
   const headerBlock = \`
-    <div style="background:\${DARK};color:#fff;padding:18px 24px;margin:0 0 4px">
-      <div style="font-size:22px;font-weight:bold;letter-spacing:.5px">MERCHANDISING ESCALATION REPORT</div>
-      <div style="font-size:14px;opacity:.92;margin-top:4px">Focus 5 Stock Status - Stores Flagged for HQ Review</div>
+    <div style="padding:14px 4px 4px">
+      <div style="font-size:22px;font-weight:bold;color:\${DARKER};letter-spacing:.3px">\${escapeHtml(titleText)}</div>
     </div>
-    <table style="border-collapse:collapse;margin:0 0 18px;font-size:12px">
+    <table style="border-collapse:collapse;margin:8px 0 18px;font-size:12px">
+      \${regionRow}
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Reporting Period</td><td style="padding:6px 12px">\${STOCK_STATE.wFromEffective || STOCK_STATE.from} to \${STOCK_STATE.wToEffective || STOCK_STATE.to}</td></tr>
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Prepared By</td><td style="padding:6px 12px">\${escapeHtml(S.manager)} (\${escapeHtml(S.level)})</td></tr>
       <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Generated</td><td style="padding:6px 12px">\${new Date().toLocaleString()}</td></tr>

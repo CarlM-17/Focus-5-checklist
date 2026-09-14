@@ -2782,6 +2782,67 @@ function buildFlaggedOverviewHTML(data, flagged, wReports){
   wReports.forEach(r => STOCK_CATS.forEach(c => (r.categories[c.name]||[]).forEach(e => allStoresInScope.add(e.store))));
   const totalStoresSeen = allStoresInScope.size;
   const flaggedPct = totalStoresSeen ? Math.round((flagged.length / totalStoresSeen) * 100) : 0;
+
+  // ---- Executive Summary analysis ----
+  const catAgg = {};
+  STOCK_CATS.forEach(c => catAgg[c.name] = { oosStores:new Set(), critStores:new Set(), oosInstances:0, critInstances:0 });
+  flagged.forEach(s => {
+    STOCK_CATS.forEach(c => {
+      const cs = s.catSummary && s.catSummary[c.name];
+      if (!cs) return;
+      if (cs.oos  > 0) { catAgg[c.name].oosStores.add(s.store);  catAgg[c.name].oosInstances  += cs.oos;  }
+      if (cs.crit > 0) { catAgg[c.name].critStores.add(s.store); catAgg[c.name].critInstances += cs.crit; }
+    });
+  });
+  const catRanked = STOCK_CATS.map(c => ({
+    name: c.name, icon: c.icon,
+    oosStores:  catAgg[c.name].oosStores.size,
+    critStores: catAgg[c.name].critStores.size,
+    oosInstances:  catAgg[c.name].oosInstances,
+    critInstances: catAgg[c.name].critInstances,
+    total: catAgg[c.name].oosInstances + catAgg[c.name].critInstances,
+    affected: new Set([...catAgg[c.name].oosStores, ...catAgg[c.name].critStores]).size
+  })).sort((a,b) => b.total - a.total);
+  const topStoresByOOS  = [...flagged].sort((a,b) => b.oosCount - a.oosCount || b.critCount - a.critCount).slice(0, 3);
+  const topStoresByRate = [...flagged].sort((a,b) => b.rate - a.rate || b.problemDays - a.problemDays).slice(0, 3);
+  const topCat = catRanked[0];
+  const catAnalysisRows = catRanked.map((c, i) => \`<tr style="background:\${i%2===0?'#ffffff':LIGHTER}">
+    <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${i===0?OOS_C:i===1?CRIT_C:DARK};color:#fff;font-weight:bold;width:36px">\${i+1}</td>
+    <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:13px;color:\${DARKER}">\${c.icon} \${c.name}</td>
+    <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${c.oosInstances>0?OOS_C:'#fafafa'};color:\${c.oosInstances>0?'#fff':'#aaa'};font-weight:\${c.oosInstances>0?'bold':'normal'};font-size:12px">\${c.oosInstances} inst - \${c.oosStores} store\${c.oosStores===1?'':'s'}</td>
+    <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${c.critInstances>0?CRIT_C:'#fafafa'};color:\${c.critInstances>0?'#fff':'#aaa'};font-weight:\${c.critInstances>0?'bold':'normal'};font-size:12px">\${c.critInstances} inst - \${c.critStores} store\${c.critStores===1?'':'s'}</td>
+    <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;font-weight:bold">\${c.affected} of \${totalStoresSeen}</td>
+  </tr>\`).join('');
+  const topStoreItems = topStoresByOOS.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - <span style="color:\${OOS_C};font-weight:bold">\${s.oosCount} OOS</span>, <span style="color:\${CRIT_C};font-weight:bold">\${s.critCount} Critical</span> in \${s.problemDays}/\${s.daysReported} days (\${s.rate}%)</li>\`).join('');
+  const topRateItems  = topStoresByRate.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - \${s.rate}% problem rate (\${s.problemDays} of \${s.daysReported} days affected)</li>\`).join('');
+  const periodText = (STOCK_STATE.wFromEffective || STOCK_STATE.from) + ' to ' + (STOCK_STATE.wToEffective || STOCK_STATE.to);
+  const execSummaryBlock = \`
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">EXECUTIVE SUMMARY</div>
+    <div style="border:1px solid #cfd8d3;border-top:0;padding:12px 14px;background:\${LIGHTER};font-size:12px;line-height:1.6;color:#334;margin-bottom:6px">
+      <div style="margin-bottom:8px"><b style="color:\${DARKER}">Reporting Period:</b> \${periodText} &nbsp;|&nbsp; <b style="color:\${DARKER}">Stores Analyzed:</b> \${totalStoresSeen} &nbsp;|&nbsp; <b style="color:\${DARKER}">Flagged:</b> \${flagged.length} (\${flaggedPct}%)</div>
+      <div style="margin-bottom:10px">Across the period, the flagged stores logged <b style="color:\${OOS_C}">\${totOOS} OOS instances</b> and <b style="color:\${CRIT_C}">\${totCrit} Critical instances</b>.\${topCat && topCat.total > 0 ? ' <b>' + topCat.icon + ' ' + topCat.name + '</b> is the most problematic category (' + topCat.total + ' combined instances across ' + topCat.affected + ' stores).' : ''}</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <div style="flex:1;min-width:260px;background:#fff;border:1px solid #e0d0d0;padding:8px 12px;border-radius:4px">
+          <div style="font-weight:bold;color:\${OOS_C};font-size:12px;margin-bottom:4px">TOP 3 STORES BY OOS VOLUME</div>
+          <ol style="margin:4px 0;padding-left:18px;font-size:12px">\${topStoreItems || '<li>none</li>'}</ol>
+        </div>
+        <div style="flex:1;min-width:260px;background:#fff;border:1px solid #e0d0d0;padding:8px 12px;border-radius:4px">
+          <div style="font-weight:bold;color:\${CRIT_C};font-size:12px;margin-bottom:4px">TOP 3 STORES BY PROBLEM RATE</div>
+          <ol style="margin:4px 0;padding-left:18px;font-size:12px">\${topRateItems || '<li>none</li>'}</ol>
+        </div>
+      </div>
+    </div>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">CATEGORY RANKING (most problematic first)</div>
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:18px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;width:36px">#</th>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left">Category</th>
+        <th style="background:\${OOS_C};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center">OOS Frequency</th>
+        <th style="background:\${CRIT_C};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center">Critical Frequency</th>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center">Stores Affected</th>
+      </tr></thead>
+      <tbody>\${catAnalysisRows}</tbody>
+    </table>\`;
   return \`
     <div style="padding:14px 4px 4px"><div style="font-size:22px;font-weight:bold;color:\${DARKER};letter-spacing:.3px">\${escapeHtml(titleText)}</div></div>
     <table style="border-collapse:collapse;margin:8px 0 18px;font-size:12px">
@@ -2799,6 +2860,7 @@ function buildFlaggedOverviewHTML(data, flagged, wReports){
         <td style="padding:14px 20px;background:\${DARK};color:#fff;font-weight:bold;text-align:center;min-width:120px"><div style="font-size:28px">\${reportingDays}</div><div style="font-size:11px;letter-spacing:.5px">REPORTING DAYS</div><div style="font-size:10px;opacity:.85;font-weight:normal;margin-top:2px">calendar days covered by this report</div></td>
       </tr>
     </table>
+    \${execSummaryBlock}
     <div style="background:\${DARK};color:#fff;padding:8px 12px;font-weight:bold;font-size:14px;letter-spacing:.3px">FLAGGED STORES OVERVIEW</div>
     <div style="color:#556;font-size:11px;margin:4px 0 4px">Each category cell shows the worst status recorded in the period, with the number of days at that status. Priority column combines OOS count and problem rate. Sorted worst first.</div>
     <div style="margin:4px 0 6px;font-size:10px;color:#556">Sparkline bars = each reported day in the range, oldest to newest. <span style="display:inline-block;width:8px;height:8px;background:\${OOS_C};vertical-align:-1px;margin:0 3px"></span>OOS <span style="display:inline-block;width:8px;height:8px;background:\${CRIT_C};vertical-align:-1px;margin:0 3px"></span>Critical <span style="display:inline-block;width:8px;height:8px;background:\${DARK};vertical-align:-1px;margin:0 3px"></span>Healthy <span style="display:inline-block;width:8px;height:8px;background:#dcdcdc;vertical-align:-1px;margin:0 3px"></span>No data</div>
@@ -3009,9 +3071,7 @@ function exportWatchlistHQ(){
   const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>HQ Escalation</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>
 <body style="font-family:Calibri,Arial,sans-serif;padding:0;margin:0">
-  \${headerBlock}
-  \${kpiBlock}
-  \${overviewBlock}
+  \${buildFlaggedOverviewHTML(data, flagged, wReports)}
   <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">DETAILED FINDINGS PER STORE</div>
   <div style="color:#556;font-size:11px;margin:4px 0 8px">Every OOS and Critical incident for each flagged store, newest first. Use these details to drive replenishment and root-cause conversations.</div>
   \${detailBlocks}

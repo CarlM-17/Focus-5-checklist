@@ -2774,9 +2774,22 @@ function buildWeeklyProgressHTML(wReports, flagged, opts){
   });
   const weeks = Object.keys(weeklyData).sort();
   if (!weeks.length) return '';
-  // Improving = fewer total issues than previous week. Otherwise (more or equal) = not improving.
-  const trendArrow = (last, prev) => {
-    if (prev === undefined || last === undefined) return { arrow: '-', color: '#888' };
+  // Detect partial weeks: Sunday hasn't ended yet
+  const todayDate = new Date(); todayDate.setHours(23,59,59,999);
+  const isPartialWeek = (mondayStr) => {
+    const mon = new Date(mondayStr + 'T00:00:00');
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    sun.setHours(23,59,59,999);
+    return sun >= todayDate; // Sunday is today or in the future
+  };
+  const completedWeekIdx = weeks.map((w,i) => ({w, i})).filter(x => !isPartialWeek(x.w)).map(x => x.i);
+  // Improving = fewer total issues than previous COMPLETED week. Otherwise (more or equal) = not improving.
+  const trendArrow = (totals) => {
+    if (completedWeekIdx.length < 2) return { arrow: 'n/a', color: '#888' };
+    const lastIdx = completedWeekIdx[completedWeekIdx.length - 1];
+    const prevIdx = completedWeekIdx[completedWeekIdx.length - 2];
+    const last = totals[lastIdx];
+    const prev = totals[prevIdx];
     if (last < prev) return { arrow: '&uarr; Improving', color: DARK };
     return { arrow: '&darr; Not Improving', color: OOS_C };
   };
@@ -2787,7 +2800,7 @@ function buildWeeklyProgressHTML(wReports, flagged, opts){
     if (norm < 0.67) return '#fff5e0';
     return '#fee';
   };
-  const weekHeaders = weeks.map(w => \`<th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;font-size:12px">\${fmtWeek(w)}</th>\`).join('');
+  const weekHeaders = weeks.map(w => \`<th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;font-size:12px">\${fmtWeek(w)}\${isPartialWeek(w) ? '<div style="font-size:10px;font-weight:normal;opacity:.85">(partial)</div>' : ''}</th>\`).join('');
   const catCellHTML = (v, bg) => {
     if (v.oos === 0 && v.crit === 0) return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;color:#888">0</td>\`;
     return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;line-height:1.35">
@@ -2807,7 +2820,7 @@ function buildWeeklyProgressHTML(wReports, flagged, opts){
     const mn = Math.min.apply(null, totals);
     const mx = Math.max.apply(null, totals);
     const cells = values.map(v => catCellHTML(v, scaleColor(v.oos + v.crit, mn, mx))).join('');
-    const trend = totals.length >= 2 ? trendArrow(totals[totals.length-1], totals[totals.length-2]) : { arrow: '-', color: '#888' };
+    const trend = trendArrow(totals);
     return \`<tr>
       <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:13px;color:\${DARKER}">\${c.icon} \${c.name}</td>
       \${cells}
@@ -2820,7 +2833,7 @@ function buildWeeklyProgressHTML(wReports, flagged, opts){
     const mn = Math.min.apply(null, totals);
     const mx = Math.max.apply(null, totals);
     const cells = values.map(v => storeCellHTML(v, scaleColor(v.oos + v.crit, mn, mx))).join('');
-    const trend = totals.length >= 2 ? trendArrow(totals[totals.length-1], totals[totals.length-2]) : { arrow: '-', color: '#888' };
+    const trend = trendArrow(totals);
     return \`<tr>
       <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:12px">\${escapeHtml(s.store)}</td>
       \${cells}
@@ -2839,7 +2852,7 @@ function buildWeeklyProgressHTML(wReports, flagged, opts){
     </table></div>\` : '';
   return \`
     <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:12px;font-weight:bold;font-size:14px;letter-spacing:.3px">WEEKLY PROGRESS REPORT</div>
-    <div style="color:#556;font-size:11px;margin:4px 0 6px">OOS and Critical counts per Mon-Sun week (with distinct stores affected for categories). Row colour scale: green = best week, red = worst week. Trend compares total (OOS+Critical) latest vs previous week.</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 6px">OOS and Critical counts per Mon-Sun week (with distinct stores affected for categories). Row colour scale: green = best week, red = worst week. Trend compares the latest 2 <b>completed</b> weeks only (in-progress weeks marked "partial" are excluded).</div>
     <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY CATEGORY</div>
     <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:12px;width:100%">
       <thead><tr>

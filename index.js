@@ -2536,7 +2536,15 @@ async function loadStockTab(){
       <tbody>\${urgentRows}</tbody></table></div>\` : '<div style="padding:14px;text-align:center;background:#e8f5ec;color:#1f7a3a;font-weight:700;border-radius:6px">All stores healthy for \${displayDate}. No urgent action needed.</div>'}
   </div>\`;
 
-  $('#stockOut').innerHTML = kpiRow2 + filterCard + missingHtml + chartCard + formCard + tableCard + urgentCard + watchCard + historyCard;
+  const weeklyProgressInAppHTML = buildWeeklyProgressHTML(wReports, flagged);
+  const weeklyProgressCard = weeklyProgressInAppHTML ? \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <h3 style="margin:0;color:#1f7a3a">Weekly Progress Report</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${wFrom} to \${wTo}</span>
+    </div>
+    \${weeklyProgressInAppHTML}
+  </div>\` : '';
+  $('#stockOut').innerHTML = kpiRow2 + filterCard + missingHtml + chartCard + formCard + tableCard + urgentCard + watchCard + weeklyProgressCard + historyCard;
 
   $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; STOCK_STATE.singleDate = null; loadStockTab(); };
   $('#stockExportBtn').onclick = exportStockExcel;
@@ -2733,6 +2741,97 @@ async function exportWatchlistPNG(){
   }
 }
 
+// Shared: build a Weekly Progress HTML block used by both the export and the in-app watchlist card
+function buildWeeklyProgressHTML(wReports, flagged){
+  const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHTER = '#f4faf6', OOS_C = '#c33';
+  const weekOf = (dateStr) => {
+    const dt = new Date(dateStr + 'T00:00:00');
+    dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+    return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+  };
+  const MO = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtWeek = (mondayStr) => {
+    const mon = new Date(mondayStr + 'T00:00:00');
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    return mon.getMonth() === sun.getMonth() ? MO[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate() : MO[mon.getMonth()]+' '+mon.getDate()+' - '+MO[sun.getMonth()]+' '+sun.getDate();
+  };
+  const weeklyData = {};
+  wReports.forEach(r => {
+    const wk = weekOf(r.date);
+    weeklyData[wk] = weeklyData[wk] || { catCounts: {}, storeCounts: {} };
+    STOCK_CATS.forEach(c => {
+      (r.categories[c.name] || []).forEach(e => {
+        if (e.status !== 'OOS' && e.status !== 'Critical') return;
+        const cat = weeklyData[wk].catCounts[c.name] = weeklyData[wk].catCounts[c.name] || { issues: 0, stores: new Set() };
+        cat.issues++; cat.stores.add(e.store);
+        weeklyData[wk].storeCounts[e.store] = (weeklyData[wk].storeCounts[e.store] || 0) + 1;
+      });
+    });
+  });
+  const weeks = Object.keys(weeklyData).sort();
+  if (!weeks.length) return '';
+  const trendArrow = (last, prev) => {
+    if (prev === undefined || last === undefined) return { arrow: '-', color: '#888' };
+    if (last < prev) return { arrow: '&darr; improving', color: DARK };
+    if (last > prev) return { arrow: '&uarr; worsening', color: OOS_C };
+    return { arrow: '&rarr; stable', color: '#888' };
+  };
+  const scaleColor = (val, min, max) => {
+    if (max === min || val === 0) return val === 0 ? '#e8f5ec' : LIGHTER;
+    const norm = (val - min) / (max - min);
+    if (norm < 0.34) return '#e8f5ec';
+    if (norm < 0.67) return '#fff5e0';
+    return '#fee';
+  };
+  const weekHeaders = weeks.map(w => \`<th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;font-size:12px">\${fmtWeek(w)}</th>\`).join('');
+  const catWeekRows = STOCK_CATS.map(c => {
+    const values = weeks.map(w => weeklyData[w].catCounts[c.name] || { issues: 0, stores: new Set() });
+    const issueCounts = values.map(v => v.issues);
+    const mn = Math.min.apply(null, issueCounts);
+    const mx = Math.max.apply(null, issueCounts);
+    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v.issues, mn, mx)};font-size:12px">\${v.issues > 0 ? '<b>'+v.issues+'</b> - '+v.stores.size+' store'+(v.stores.size===1?'':'s') : '<span style="color:#888">0</span>'}</td>\`).join('');
+    const trend = issueCounts.length >= 2 ? trendArrow(issueCounts[issueCounts.length-1], issueCounts[issueCounts.length-2]) : { arrow: '-', color: '#888' };
+    return \`<tr>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:13px;color:\${DARKER}">\${c.icon} \${c.name}</td>
+      \${cells}
+      <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;color:\${trend.color};font-weight:bold;font-size:12px">\${trend.arrow}</td>
+    </tr>\`;
+  }).join('');
+  const storeWeekRows = flagged.map(s => {
+    const values = weeks.map(w => weeklyData[w].storeCounts[s.store] || 0);
+    const mn = Math.min.apply(null, values);
+    const mx = Math.max.apply(null, values);
+    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v, mn, mx)};font-size:12px">\${v > 0 ? '<b>'+v+'</b>' : '<span style="color:#888">0</span>'}</td>\`).join('');
+    const trend = values.length >= 2 ? trendArrow(values[values.length-1], values[values.length-2]) : { arrow: '-', color: '#888' };
+    return \`<tr>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:12px">\${escapeHtml(s.store)}</td>
+      \${cells}
+      <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;color:\${trend.color};font-weight:bold;font-size:12px">\${trend.arrow}</td>
+    </tr>\`;
+  }).join('');
+  return \`
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:12px;font-weight:bold;font-size:14px;letter-spacing:.3px">WEEKLY PROGRESS REPORT</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 6px">Values show OOS+Critical instances per Mon-Sun week. Colour scale per row: green = best week, red = worst week. Trend compares latest 2 weeks.</div>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY CATEGORY</div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:12px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:140px">Category</th>
+        \${weekHeaders}
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
+      </tr></thead>
+      <tbody>\${catWeekRows}</tbody>
+    </table></div>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY STORE (all flagged)</div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:18px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:160px">Store</th>
+        \${weekHeaders}
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
+      </tr></thead>
+      <tbody>\${storeWeekRows}</tbody>
+    </table></div>\`;
+}
+
 // Shared overview HTML builder — used by both the Excel export (as embedded block) and PNG export
 function buildFlaggedOverviewHTML(data, flagged, wReports){
   const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6';
@@ -2816,8 +2915,100 @@ function buildFlaggedOverviewHTML(data, flagged, wReports){
   const topStoreItems = topStoresByOOS.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - <span style="color:\${OOS_C};font-weight:bold">\${s.oosCount} OOS</span>, <span style="color:\${CRIT_C};font-weight:bold">\${s.critCount} Critical</span> in \${s.problemDays}/\${s.daysReported} days (\${s.rate}%)</li>\`).join('');
   const topRateItems  = topStoresByRate.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - \${s.rate}% problem rate (\${s.problemDays} of \${s.daysReported} days affected)</li>\`).join('');
   const periodText = (STOCK_STATE.wFromEffective || STOCK_STATE.from) + ' to ' + (STOCK_STATE.wToEffective || STOCK_STATE.to);
+  const weeklyProgressBlock = buildWeeklyProgressHTML(wReports, flagged);
+  /* Old inline computation kept commented out - now handled by helper */
+  const _unused_weeklyBlockBuilder = () => {
+  const weekOf2 = (dateStr) => {
+    const dt = new Date(dateStr + 'T00:00:00');
+    dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+    return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+  };
+  const MONTHS_S2 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtWeek2 = (mondayStr) => {
+    const mon = new Date(mondayStr + 'T00:00:00');
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    return mon.getMonth() === sun.getMonth()
+      ? MONTHS_S2[mon.getMonth()] + ' ' + mon.getDate() + '-' + sun.getDate()
+      : MONTHS_S2[mon.getMonth()] + ' ' + mon.getDate() + ' - ' + MONTHS_S2[sun.getMonth()] + ' ' + sun.getDate();
+  };
+  const weeklyData = {};
+  wReports.forEach(r => {
+    const wk = weekOf2(r.date);
+    weeklyData[wk] = weeklyData[wk] || { catCounts: {}, storeCounts: {} };
+    STOCK_CATS.forEach(c => {
+      (r.categories[c.name] || []).forEach(e => {
+        if (e.status !== 'OOS' && e.status !== 'Critical') return;
+        const cat = weeklyData[wk].catCounts[c.name] = weeklyData[wk].catCounts[c.name] || { issues: 0, stores: new Set() };
+        cat.issues++; cat.stores.add(e.store);
+        weeklyData[wk].storeCounts[e.store] = (weeklyData[wk].storeCounts[e.store] || 0) + 1;
+      });
+    });
+  });
+  const weeksList = Object.keys(weeklyData).sort();
+  const trendArrow = (last, prev) => {
+    if (prev === undefined || last === undefined) return { arrow: '-', color: '#888' };
+    if (last < prev) return { arrow: '&darr; improving', color: DARK };
+    if (last > prev) return { arrow: '&uarr; worsening', color: OOS_C };
+    return { arrow: '&rarr; stable', color: '#888' };
+  };
+  const scaleColor = (val, min, max) => {
+    if (max === min || val === 0) return val === 0 ? '#e8f5ec' : LIGHTER;
+    const norm = (val - min) / (max - min);
+    if (norm < 0.34) return '#e8f5ec';
+    if (norm < 0.67) return '#fff5e0';
+    return '#fee';
+  };
+  const weekHeaders = weeksList.map(w => \`<th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;font-size:12px">\${fmtWeek2(w)}</th>\`).join('');
+  const catWeekRows = STOCK_CATS.map(c => {
+    const values = weeksList.map(w => weeklyData[w].catCounts[c.name] || { issues: 0, stores: new Set() });
+    const issueCounts = values.map(v => v.issues);
+    const mn = Math.min.apply(null, issueCounts.length ? issueCounts : [0]);
+    const mx = Math.max.apply(null, issueCounts.length ? issueCounts : [0]);
+    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v.issues, mn, mx)};font-size:12px">\${v.issues > 0 ? '<b>'+v.issues+'</b> - '+v.stores.size+' store'+(v.stores.size===1?'':'s') : '<span style="color:#888">0</span>'}</td>\`).join('');
+    const trend = issueCounts.length >= 2 ? trendArrow(issueCounts[issueCounts.length-1], issueCounts[issueCounts.length-2]) : { arrow: '-', color: '#888' };
+    return \`<tr>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:13px;color:\${DARKER}">\${c.icon} \${c.name}</td>
+      \${cells}
+      <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;color:\${trend.color};font-weight:bold;font-size:12px">\${trend.arrow}</td>
+    </tr>\`;
+  }).join('');
+  const storeWeekRows = flagged.map(s => {
+    const values = weeksList.map(w => weeklyData[w].storeCounts[s.store] || 0);
+    const mn = Math.min.apply(null, values.length ? values : [0]);
+    const mx = Math.max.apply(null, values.length ? values : [0]);
+    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v, mn, mx)};font-size:12px">\${v > 0 ? '<b>'+v+'</b>' : '<span style="color:#888">0</span>'}</td>\`).join('');
+    const trend = values.length >= 2 ? trendArrow(values[values.length-1], values[values.length-2]) : { arrow: '-', color: '#888' };
+    return \`<tr>
+      <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:12px">\${escapeHtml(s.store)}</td>
+      \${cells}
+      <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;color:\${trend.color};font-weight:bold;font-size:12px">\${trend.arrow}</td>
+    </tr>\`;
+  }).join('');
+  const weeklyProgressBlock = weeksList.length ? \`
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:12px;font-weight:bold;font-size:14px;letter-spacing:.3px">WEEKLY PROGRESS REPORT</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 6px">Values show OOS+Critical instances per Mon-Sun week. Colour scale per row: green = best week, red = worst week. Trend compares latest 2 weeks.</div>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY CATEGORY</div>
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:12px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:140px">Category</th>
+        \${weekHeaders}
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
+      </tr></thead>
+      <tbody>\${catWeekRows}</tbody>
+    </table>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY STORE (all flagged)</div>
+    <table style="border-collapse:collapse;font-size:12px;margin-bottom:18px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:160px">Store</th>
+        \${weekHeaders}
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
+      </tr></thead>
+      <tbody>\${storeWeekRows}</tbody>
+    </table>\` : '';
+  }; // end _unused_weeklyBlockBuilder
+
   const execSummaryBlock = \`
-    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">EXECUTIVE SUMMARY</div>
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:6px;font-weight:bold;font-size:14px;letter-spacing:.3px">KEY INSIGHTS</div>
     <div style="border:1px solid #cfd8d3;border-top:0;padding:12px 14px;background:\${LIGHTER};font-size:12px;line-height:1.6;color:#334;margin-bottom:6px">
       <div style="margin-bottom:8px"><b style="color:\${DARKER}">Reporting Period:</b> \${periodText} &nbsp;|&nbsp; <b style="color:\${DARKER}">Stores Analyzed:</b> \${totalStoresSeen} &nbsp;|&nbsp; <b style="color:\${DARKER}">Flagged:</b> \${flagged.length} (\${flaggedPct}%)</div>
       <div style="margin-bottom:10px">Across the period, the flagged stores logged <b style="color:\${OOS_C}">\${totOOS} OOS instances</b> and <b style="color:\${CRIT_C}">\${totCrit} Critical instances</b>.\${topCat && topCat.total > 0 ? ' <b>' + topCat.icon + ' ' + topCat.name + '</b> is the most problematic category (' + topCat.total + ' combined instances across ' + topCat.affected + ' stores).' : ''}</div>
@@ -2861,6 +3052,7 @@ function buildFlaggedOverviewHTML(data, flagged, wReports){
       </tr>
     </table>
     \${execSummaryBlock}
+    \${weeklyProgressBlock}
     <div style="background:\${DARK};color:#fff;padding:8px 12px;font-weight:bold;font-size:14px;letter-spacing:.3px">FLAGGED STORES OVERVIEW</div>
     <div style="color:#556;font-size:11px;margin:4px 0 4px">Each category cell shows the worst status recorded in the period, with the number of days at that status. Priority column combines OOS count and problem rate. Sorted worst first.</div>
     <div style="margin:4px 0 6px;font-size:10px;color:#556">Sparkline bars = each reported day in the range, oldest to newest. <span style="display:inline-block;width:8px;height:8px;background:\${OOS_C};vertical-align:-1px;margin:0 3px"></span>OOS <span style="display:inline-block;width:8px;height:8px;background:\${CRIT_C};vertical-align:-1px;margin:0 3px"></span>Critical <span style="display:inline-block;width:8px;height:8px;background:\${DARK};vertical-align:-1px;margin:0 3px"></span>Healthy <span style="display:inline-block;width:8px;height:8px;background:#dcdcdc;vertical-align:-1px;margin:0 3px"></span>No data</div>

@@ -2714,7 +2714,7 @@ async function exportWatchlistPNG(){
   const btn = $('#watchExportPngBtn'); const orig = btn ? btn.textContent : ''; if (btn){ btn.disabled = true; btn.textContent = 'Rendering...'; }
   try {
     // Build the same overview HTML the Excel export uses, but skipping the detail blocks.
-    const html = buildFlaggedOverviewHTML(data, flagged, wReports);
+    const html = buildFlaggedOverviewHTML(data, flagged, wReports, { omitStoreProgress: true });
     const container = document.createElement('div');
     // display:inline-block + width:max-content so the box shrinks to fit the widest table (no trailing white space)
     container.style.cssText = 'position:absolute;left:-99999px;top:0;background:#fff;padding:20px;display:inline-block;width:max-content;font-family:Calibri,Arial,sans-serif';
@@ -2742,8 +2742,10 @@ async function exportWatchlistPNG(){
 }
 
 // Shared: build a Weekly Progress HTML block used by both the export and the in-app watchlist card
-function buildWeeklyProgressHTML(wReports, flagged){
-  const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHTER = '#f4faf6', OOS_C = '#c33';
+function buildWeeklyProgressHTML(wReports, flagged, opts){
+  opts = opts || {};
+  const includeStore = opts.omitStoreProgress ? false : true;
+  const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHTER = '#f4faf6', OOS_C = '#c33', CRIT_C = '#e0a020';
   const weekOf = (dateStr) => {
     const dt = new Date(dateStr + 'T00:00:00');
     dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
@@ -2762,19 +2764,21 @@ function buildWeeklyProgressHTML(wReports, flagged){
     STOCK_CATS.forEach(c => {
       (r.categories[c.name] || []).forEach(e => {
         if (e.status !== 'OOS' && e.status !== 'Critical') return;
-        const cat = weeklyData[wk].catCounts[c.name] = weeklyData[wk].catCounts[c.name] || { issues: 0, stores: new Set() };
-        cat.issues++; cat.stores.add(e.store);
-        weeklyData[wk].storeCounts[e.store] = (weeklyData[wk].storeCounts[e.store] || 0) + 1;
+        const cat = weeklyData[wk].catCounts[c.name] = weeklyData[wk].catCounts[c.name] || { oos:0, crit:0, stores: new Set() };
+        if (e.status === 'OOS') cat.oos++; else cat.crit++;
+        cat.stores.add(e.store);
+        const st = weeklyData[wk].storeCounts[e.store] = weeklyData[wk].storeCounts[e.store] || { oos:0, crit:0 };
+        if (e.status === 'OOS') st.oos++; else st.crit++;
       });
     });
   });
   const weeks = Object.keys(weeklyData).sort();
   if (!weeks.length) return '';
+  // Improving = fewer total issues than previous week. Otherwise (more or equal) = not improving.
   const trendArrow = (last, prev) => {
     if (prev === undefined || last === undefined) return { arrow: '-', color: '#888' };
-    if (last < prev) return { arrow: '&darr; improving', color: DARK };
-    if (last > prev) return { arrow: '&uarr; worsening', color: OOS_C };
-    return { arrow: '&rarr; stable', color: '#888' };
+    if (last < prev) return { arrow: '&uarr; Improving', color: DARK };
+    return { arrow: '&darr; Not Improving', color: OOS_C };
   };
   const scaleColor = (val, min, max) => {
     if (max === min || val === 0) return val === 0 ? '#e8f5ec' : LIGHTER;
@@ -2784,13 +2788,26 @@ function buildWeeklyProgressHTML(wReports, flagged){
     return '#fee';
   };
   const weekHeaders = weeks.map(w => \`<th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;font-size:12px">\${fmtWeek(w)}</th>\`).join('');
+  const catCellHTML = (v, bg) => {
+    if (v.oos === 0 && v.crit === 0) return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;color:#888">0</td>\`;
+    return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;line-height:1.35">
+      <div><span style="color:\${OOS_C};font-weight:bold">\${v.oos} OOS</span> &nbsp; <span style="color:\${CRIT_C};font-weight:bold">\${v.crit} Crit</span></div>
+      <div style="color:#556;font-size:11px">\${v.stores.size} store\${v.stores.size===1?'':'s'}</div>
+    </td>\`;
+  };
+  const storeCellHTML = (v, bg) => {
+    if (!v || (v.oos === 0 && v.crit === 0)) return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;color:#888">0</td>\`;
+    return \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${bg};font-size:12px;line-height:1.35">
+      <span style="color:\${OOS_C};font-weight:bold">\${v.oos} OOS</span> &nbsp; <span style="color:\${CRIT_C};font-weight:bold">\${v.crit} Crit</span>
+    </td>\`;
+  };
   const catWeekRows = STOCK_CATS.map(c => {
-    const values = weeks.map(w => weeklyData[w].catCounts[c.name] || { issues: 0, stores: new Set() });
-    const issueCounts = values.map(v => v.issues);
-    const mn = Math.min.apply(null, issueCounts);
-    const mx = Math.max.apply(null, issueCounts);
-    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v.issues, mn, mx)};font-size:12px">\${v.issues > 0 ? '<b>'+v.issues+'</b> - '+v.stores.size+' store'+(v.stores.size===1?'':'s') : '<span style="color:#888">0</span>'}</td>\`).join('');
-    const trend = issueCounts.length >= 2 ? trendArrow(issueCounts[issueCounts.length-1], issueCounts[issueCounts.length-2]) : { arrow: '-', color: '#888' };
+    const values = weeks.map(w => weeklyData[w].catCounts[c.name] || { oos:0, crit:0, stores: new Set() });
+    const totals = values.map(v => v.oos + v.crit);
+    const mn = Math.min.apply(null, totals);
+    const mx = Math.max.apply(null, totals);
+    const cells = values.map(v => catCellHTML(v, scaleColor(v.oos + v.crit, mn, mx))).join('');
+    const trend = totals.length >= 2 ? trendArrow(totals[totals.length-1], totals[totals.length-2]) : { arrow: '-', color: '#888' };
     return \`<tr>
       <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:13px;color:\${DARKER}">\${c.icon} \${c.name}</td>
       \${cells}
@@ -2798,42 +2815,46 @@ function buildWeeklyProgressHTML(wReports, flagged){
     </tr>\`;
   }).join('');
   const storeWeekRows = flagged.map(s => {
-    const values = weeks.map(w => weeklyData[w].storeCounts[s.store] || 0);
-    const mn = Math.min.apply(null, values);
-    const mx = Math.max.apply(null, values);
-    const cells = values.map(v => \`<td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;background:\${scaleColor(v, mn, mx)};font-size:12px">\${v > 0 ? '<b>'+v+'</b>' : '<span style="color:#888">0</span>'}</td>\`).join('');
-    const trend = values.length >= 2 ? trendArrow(values[values.length-1], values[values.length-2]) : { arrow: '-', color: '#888' };
+    const values = weeks.map(w => weeklyData[w].storeCounts[s.store] || { oos:0, crit:0 });
+    const totals = values.map(v => v.oos + v.crit);
+    const mn = Math.min.apply(null, totals);
+    const mx = Math.max.apply(null, totals);
+    const cells = values.map(v => storeCellHTML(v, scaleColor(v.oos + v.crit, mn, mx))).join('');
+    const trend = totals.length >= 2 ? trendArrow(totals[totals.length-1], totals[totals.length-2]) : { arrow: '-', color: '#888' };
     return \`<tr>
       <td style="border:1px solid #cfd8d3;padding:5px 10px;font-weight:bold;font-size:12px">\${escapeHtml(s.store)}</td>
       \${cells}
       <td style="border:1px solid #cfd8d3;padding:5px 8px;text-align:center;color:\${trend.color};font-weight:bold;font-size:12px">\${trend.arrow}</td>
     </tr>\`;
   }).join('');
-  return \`
-    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:12px;font-weight:bold;font-size:14px;letter-spacing:.3px">WEEKLY PROGRESS REPORT</div>
-    <div style="color:#556;font-size:11px;margin:4px 0 6px">Values show OOS+Critical instances per Mon-Sun week. Colour scale per row: green = best week, red = worst week. Trend compares latest 2 weeks.</div>
-    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY CATEGORY</div>
-    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:12px;width:100%">
-      <thead><tr>
-        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:140px">Category</th>
-        \${weekHeaders}
-        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
-      </tr></thead>
-      <tbody>\${catWeekRows}</tbody>
-    </table></div>
+  const storeSection = includeStore ? \`
     <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY STORE (all flagged)</div>
     <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:18px;width:100%">
       <thead><tr>
         <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:160px">Store</th>
         \${weekHeaders}
-        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:110px">Trend</th>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:130px">Trend</th>
       </tr></thead>
       <tbody>\${storeWeekRows}</tbody>
-    </table></div>\`;
+    </table></div>\` : '';
+  return \`
+    <div style="background:\${DARK};color:#fff;padding:8px 12px;margin-top:12px;font-weight:bold;font-size:14px;letter-spacing:.3px">WEEKLY PROGRESS REPORT</div>
+    <div style="color:#556;font-size:11px;margin:4px 0 6px">OOS and Critical counts per Mon-Sun week (with distinct stores affected for categories). Row colour scale: green = best week, red = worst week. Trend compares total (OOS+Critical) latest vs previous week.</div>
+    <div style="background:\${DARKER};color:#fff;padding:6px 12px;font-weight:bold;font-size:12px;letter-spacing:.3px">BY CATEGORY</div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-bottom:12px;width:100%">
+      <thead><tr>
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:left;min-width:140px">Category</th>
+        \${weekHeaders}
+        <th style="background:\${DARK};color:#fff;padding:6px 8px;border:1px solid \${DARKER};font-weight:bold;text-align:center;min-width:130px">Trend</th>
+      </tr></thead>
+      <tbody>\${catWeekRows}</tbody>
+    </table></div>
+    \${storeSection}\`;
 }
 
 // Shared overview HTML builder — used by both the Excel export (as embedded block) and PNG export
-function buildFlaggedOverviewHTML(data, flagged, wReports){
+function buildFlaggedOverviewHTML(data, flagged, wReports, opts){
+  opts = opts || {};
   const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6';
   const OOS_C = '#c33', CRIT_C = '#e0a020';
   const isAMRole = (S.level||'').toLowerCase() === 'area manager';
@@ -2915,7 +2936,7 @@ function buildFlaggedOverviewHTML(data, flagged, wReports){
   const topStoreItems = topStoresByOOS.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - <span style="color:\${OOS_C};font-weight:bold">\${s.oosCount} OOS</span>, <span style="color:\${CRIT_C};font-weight:bold">\${s.critCount} Critical</span> in \${s.problemDays}/\${s.daysReported} days (\${s.rate}%)</li>\`).join('');
   const topRateItems  = topStoresByRate.map(s => \`<li style="margin:2px 0"><b>\${escapeHtml(s.store)}</b> - \${s.rate}% problem rate (\${s.problemDays} of \${s.daysReported} days affected)</li>\`).join('');
   const periodText = (STOCK_STATE.wFromEffective || STOCK_STATE.from) + ' to ' + (STOCK_STATE.wToEffective || STOCK_STATE.to);
-  const weeklyProgressBlock = buildWeeklyProgressHTML(wReports, flagged);
+  const weeklyProgressBlock = buildWeeklyProgressHTML(wReports, flagged, opts);
   /* Old inline computation kept commented out - now handled by helper */
   const _unused_weeklyBlockBuilder = () => {
   const weekOf2 = (dateStr) => {

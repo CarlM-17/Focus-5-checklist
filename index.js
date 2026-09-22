@@ -2536,7 +2536,7 @@ async function loadStockTab(){
       <tbody>\${urgentRows}</tbody></table></div>\` : '<div style="padding:14px;text-align:center;background:#e8f5ec;color:#1f7a3a;font-weight:700;border-radius:6px">All stores healthy for \${displayDate}. No urgent action needed.</div>'}
   </div>\`;
 
-  const weeklyProgressInAppHTML = buildWeeklyProgressHTML(wReports, flagged);
+  const weeklyProgressInAppHTML = buildWeeklyProgressHTML(wReports, flaggedStores);
   const weeklyProgressCard = weeklyProgressInAppHTML ? \`<div class="card">
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
       <h3 style="margin:0;color:#1f7a3a">Weekly Progress Report</h3>

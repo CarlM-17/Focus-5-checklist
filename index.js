@@ -1010,7 +1010,7 @@ const REVIEW_DEADLINE_HR = { AM: 11, PM: 16 }; // PH local
 
 app.post('/api/review-submit', async (req, res) => {
   try {
-    const { manager, store, date, slot } = req.body || {};
+    const { manager, store, date, slot, confirmedOOS } = req.body || {};
     if (!manager || !store || !date || !slot) return res.json({ ok:false, error:'Missing fields' });
     if (!['AM','PM'].includes(slot)) return res.json({ ok:false, error:'Invalid slot (AM or PM only)' });
     const existing = await sheetsGet('StockReviewData!A2:I');
@@ -1022,9 +1022,12 @@ app.post('/api/review-submit', async (req, res) => {
       (r[5] || '').trim().toUpperCase() === slot
     );
     if (already) return res.json({ ok:false, error: slot + ' review for ' + store + ' on ' + date + ' already recorded' });
+    const comments = Array.isArray(confirmedOOS) && confirmedOOS.length
+      ? 'Confirmed OOS (' + confirmedOOS.length + '): ' + confirmedOOS.join(', ')
+      : 'No OOS to confirm';
     const ts = new Date().toISOString();
     const id = 'RV' + Date.now();
-    const row = [[ts, id, manager, store, date, slot, 'Validated', '', 'ACTIVE']];
+    const row = [[ts, id, manager, store, date, slot, 'Validated', comments, 'ACTIVE']];
     await sheetsAppend('StockReviewData!A1:I1', row);
     res.json({ ok:true, reviewId: id });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
@@ -1062,11 +1065,14 @@ app.get('/api/review-pending', async (req, res) => {
       const slot = ((r[5] || 'AM') + '').trim().toUpperCase();
       const k = store + '||' + slot;
       if (!skuBySlot[k] || skuBySlot[k].id !== r[1]) return;
-      aggSKU[k] = aggSKU[k] || { total:0, available:0, oos:0, timestamp:skuBySlot[k].timestamp };
+      aggSKU[k] = aggSKU[k] || { total:0, available:0, oos:0, timestamp:skuBySlot[k].timestamp, oosList:[] };
       aggSKU[k].total++;
       const st = (r[10] || '').trim();
       if (st === 'Available') aggSKU[k].available++;
-      else if (st === 'OOS') aggSKU[k].oos++;
+      else if (st === 'OOS') {
+        aggSKU[k].oos++;
+        aggSKU[k].oosList.push({ sku: r[8], description: r[9], category: r[6], rank: parseInt(r[7])||0, remarks: r[11] || '' });
+      }
     });
     // Compute SKU on-time (SM deadlines 10 / 15)
     Object.keys(aggSKU).forEach(k => {
@@ -1111,6 +1117,7 @@ app.get('/api/review-pending', async (req, res) => {
           skuTotal:     sku ? sku.total     : 0,
           skuOnTime:    sku ? sku.onTime    : null,
           skuTimestamp: sku ? sku.timestamp : null,
+          oosList:      sku ? sku.oosList   : [],
           reviewed: !!review,
           reviewTimestamp: review ? review.timestamp : null,
           reviewOnTime:    review ? review.onTime    : null
@@ -3717,19 +3724,26 @@ async function submitStock(){
 }
 
 // ---- Stock Review (Area Manager) ----
-let REVIEW_STATE = { items: [], loading: false };
+let REVIEW_STATE = { items: [], loading: false, expanded: {}, confirmed: {} };
+// expanded: { "store||slot": true }
+// confirmed: { "store||slot": Set of SKU codes }
+function rvKey(store, slot){ return store + '||' + slot; }
 
 async function loadReviewTab(){
   const out = $('#stockOut');
   out.innerHTML = '<div class="card muted">Loading reviews...</div>';
   const date = todayStr();
-  const [pendingRes, monitorRes] = await Promise.all([
-    api('/api/review-pending?manager=' + encodeURIComponent(S.manager) + '&date=' + date),
-    api('/api/review-monitor?date=' + date)
+  const [pendingRes] = await Promise.all([
+    api('/api/review-pending?manager=' + encodeURIComponent(S.manager) + '&date=' + date)
   ]);
   if (!pendingRes.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(pendingRes.error||'Failed')+'</div>'; return; }
   REVIEW_STATE.items = pendingRes.items || [];
+  renderReviewTab();
+}
 
+function renderReviewTab(){
+  const out = $('#stockOut');
+  const date = todayStr();
   const items = REVIEW_STATE.items;
   const amItems = items.filter(x => x.slot === 'AM');
   const pmItems = items.filter(x => x.slot === 'PM');
@@ -3777,10 +3791,18 @@ async function loadReviewTab(){
 
   out.innerHTML = headerCard + amSection + pmSection;
   document.querySelectorAll('[data-review-store]').forEach(b => b.onclick = () => doReview(b.dataset.reviewStore, b.dataset.reviewSlot));
+  document.querySelectorAll('[data-rv-toggle]').forEach(b => b.onclick = () => toggleRvExpand(b.dataset.rvToggle, b.dataset.rvSlot));
+  document.querySelectorAll('[data-rv-sku]').forEach(cb => cb.onchange = () => toggleRvSku(cb.dataset.rvStore, cb.dataset.rvSlot2, cb.dataset.rvSku));
+  document.querySelectorAll('[data-rv-confirmall]').forEach(b => b.onclick = () => confirmAllRvSkus(b.dataset.rvConfirmall, b.dataset.rvSlot));
 }
 
 function reviewCardHTML(x, deadlinePassed){
   const DARK = '#1f7a3a', OOS = '#c33', AMBER = '#e0a020';
+  const key = rvKey(x.store, x.slot);
+  const oosList = x.oosList || [];
+  const confirmed = REVIEW_STATE.confirmed[key] || new Set();
+  const expanded = REVIEW_STATE.expanded[key];
+  const allConfirmed = oosList.length === 0 || oosList.every(o => confirmed.has(o.sku));
   let statusBadge, borderColor, bgTint;
   if (x.reviewed) {
     statusBadge = x.reviewOnTime
@@ -3803,21 +3825,77 @@ function reviewCardHTML(x, deadlinePassed){
   const reviewInfo = x.reviewed
     ? '<div style="font-size:11px;color:#789;margin-top:4px">Reviewed ' + new Date(x.reviewTimestamp).toLocaleString() + '</div>'
     : '';
+  // Expand/collapse for OOS SKU confirmation
+  let expandSection = '';
+  if (!x.reviewed && x.skuSubmitted && oosList.length) {
+    const confirmedCount = oosList.filter(o => confirmed.has(o.sku)).length;
+    const toggleBtn = '<button data-rv-toggle="'+escapeHtml(x.store)+'" data-rv-slot="'+x.slot+'" style="margin-top:8px;width:100%;background:#eef;color:#223;border:0;padding:8px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px">'+(expanded?'&#9660; Hide OOS list':'&#9654; Review '+oosList.length+' OOS SKUs ('+confirmedCount+'/'+oosList.length+' confirmed)')+'</button>';
+    let oosHtml = '';
+    if (expanded) {
+      const confirmAllBtn = '<button data-rv-confirmall="'+escapeHtml(x.store)+'" data-rv-slot="'+x.slot+'" style="margin:6px 0;background:#1f7a3a;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Confirm All</button>';
+      oosHtml = '<div style="margin-top:6px;padding:8px;background:#fff5f5;border-radius:4px;max-height:280px;overflow-y:auto">'
+        + confirmAllBtn
+        + oosList.map(o => {
+          const checked = confirmed.has(o.sku) ? 'checked' : '';
+          return '<label style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;border-bottom:1px dashed #eed;cursor:pointer">'
+            + '<input type="checkbox" '+checked+' data-rv-sku="'+escapeHtml(o.sku)+'" data-rv-store="'+escapeHtml(x.store)+'" data-rv-slot2="'+x.slot+'" style="margin-top:3px"/>'
+            + '<div style="flex:1;font-size:11px">'
+              + '<div><b style="color:#c33">OOS</b> &middot; <b>'+escapeHtml(o.description||o.sku)+'</b></div>'
+              + '<div style="color:#789">'+escapeHtml(o.sku||'')+' &middot; '+escapeHtml(o.category||'')+' &middot; Rank #'+(o.rank||'?')+'</div>'
+              + (o.remarks ? '<div style="color:#456;font-style:italic;margin-top:2px">"'+escapeHtml(o.remarks)+'"</div>' : '')
+            + '</div>'
+          + '</label>';
+        }).join('')
+        + '</div>';
+    }
+    expandSection = toggleBtn + oosHtml;
+  }
   const btn = (!x.reviewed && x.skuSubmitted)
-    ? '<button data-review-store="'+escapeHtml(x.store)+'" data-review-slot="'+x.slot+'" style="margin-top:8px;width:100%;background:'+DARK+';color:#fff;border:0;padding:10px;border-radius:6px;font-weight:700;cursor:pointer">Validate</button>'
+    ? '<button data-review-store="'+escapeHtml(x.store)+'" data-review-slot="'+x.slot+'" '+(allConfirmed?'':'disabled')+' style="margin-top:8px;width:100%;background:'+(allConfirmed?DARK:'#aaa')+';color:#fff;border:0;padding:10px;border-radius:6px;font-weight:700;cursor:'+(allConfirmed?'pointer':'not-allowed')+'">'+(oosList.length?'Validate ('+confirmed.size+'/'+oosList.length+' confirmed)':'Validate (no OOS)')+'</button>'
+      + (!allConfirmed ? '<div style="font-size:10px;color:#c33;margin-top:4px;text-align:center">Confirm every OOS SKU before validating</div>' : '')
     : '';
   return '<div style="border:1px solid #ddd;border-left:4px solid '+borderColor+';background:'+bgTint+';border-radius:6px;padding:10px">'
     + '<div style="display:flex;align-items:center;gap:6px"><b style="font-size:13px;color:#223;flex:1">'+escapeHtml(x.store)+'</b>'+statusBadge+'</div>'
     + '<div style="font-size:11px;color:#789;margin-top:2px">'+escapeHtml(x.area||'')+'</div>'
-    + skuStat + reviewInfo + btn
+    + skuStat + reviewInfo + expandSection + btn
     + '</div>';
 }
 
+function toggleRvExpand(store, slot){
+  const k = rvKey(store, slot);
+  REVIEW_STATE.expanded[k] = !REVIEW_STATE.expanded[k];
+  renderReviewTab();
+}
+function toggleRvSku(store, slot, sku){
+  const k = rvKey(store, slot);
+  if (!REVIEW_STATE.confirmed[k]) REVIEW_STATE.confirmed[k] = new Set();
+  if (REVIEW_STATE.confirmed[k].has(sku)) REVIEW_STATE.confirmed[k].delete(sku);
+  else REVIEW_STATE.confirmed[k].add(sku);
+  renderReviewTab();
+}
+function confirmAllRvSkus(store, slot){
+  const k = rvKey(store, slot);
+  const item = REVIEW_STATE.items.find(x => x.store === store && x.slot === slot);
+  if (!item) return;
+  REVIEW_STATE.confirmed[k] = new Set((item.oosList||[]).map(o => o.sku));
+  renderReviewTab();
+}
+
 async function doReview(store, slot){
-  if (!confirm('Validate ' + slot + ' slot for ' + store + '? This records your sign-off and cannot be undone.')) return;
+  const k = rvKey(store, slot);
+  const confirmedOOS = [...(REVIEW_STATE.confirmed[k] || new Set())];
+  const item = REVIEW_STATE.items.find(x => x.store === store && x.slot === slot);
+  const totalOOS = item ? (item.oosList||[]).length : 0;
+  const msg = totalOOS
+    ? 'Validate ' + slot + ' slot for ' + store + '?\\n\\nYou have confirmed ' + confirmedOOS.length + ' of ' + totalOOS + ' OOS SKUs.\\n\\nThis records your sign-off and cannot be undone.'
+    : 'Validate ' + slot + ' slot for ' + store + '? No OOS to confirm.\\n\\nThis records your sign-off and cannot be undone.';
+  if (!confirm(msg)) return;
   const r = await api('/api/review-submit', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ manager: S.manager, store, date: todayStr(), slot }) });
+    body: JSON.stringify({ manager: S.manager, store, date: todayStr(), slot, confirmedOOS }) });
   if (!r.ok) { alert(r.error || 'Failed'); return; }
+  // Clear confirmed state and reload
+  delete REVIEW_STATE.confirmed[k];
+  delete REVIEW_STATE.expanded[k];
   loadReviewTab();
 }
 

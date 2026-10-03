@@ -890,6 +890,14 @@ app.post('/api/sku-submit', async (req, res) => {
     }
     const twoDaysAgo = new Date(Date.now() - 2*86400*1000).toISOString().slice(0,10);
     if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
+    // Lock once submitted: reject if an ACTIVE record already exists for this (storeMgr, date)
+    const existing = await sheetsGet('SKUChecklistData!A2:L');
+    const alreadySubmitted = existing.some(r =>
+      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      (r[2] || '').trim().toLowerCase() === storeMgr.trim().toLowerCase() &&
+      r[4] === date
+    );
+    if (alreadySubmitted) return res.json({ ok:false, error:'This date already has a submitted checklist. Submissions are locked once sent.' });
     const ts = new Date().toISOString();
     const id = 'KS' + Date.now();
     const rows = entries.map(e => [
@@ -898,7 +906,6 @@ app.post('/api/sku-submit', async (req, res) => {
       e.status || '', e.remarks || '', 'ACTIVE'
     ]);
     await sheetsAppend('SKUChecklistData!A1:L1', rows);
-    try { await markSKUEdited(storeMgr, date, id); } catch(_) {}
     res.json({ ok:true, reportId: id });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
@@ -955,6 +962,32 @@ app.get('/api/sku-history', async (req, res) => {
       return { date, total, available: avail, oos, timestamp: obj.timestamp, onTime, reportId: obj.id };
     }).sort((a,b) => b.date.localeCompare(a.date));
     res.json({ ok:true, days });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/sku-history-detail', async (req, res) => {
+  try {
+    const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
+    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const filtered = rows.filter(r =>
+      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      (!from || (r[4] || '') >= from) &&
+      (!to   || (r[4] || '') <= to)
+    );
+    // Pick latest ReportID per date
+    const byDate = {};
+    filtered.forEach(r => { const d = r[4]; if (!d) return; if (!byDate[d] || r[1] > byDate[d]) byDate[d] = r[1]; });
+    const entries = [];
+    filtered.forEach(r => {
+      const d = r[4];
+      if (byDate[d] !== r[1]) return;
+      entries.push({ date:d, timestamp:r[0], store:r[3], category:r[5], rank:parseInt(r[6])||0, sku:r[7], description:r[8], status:r[9], remarks:r[10] });
+    });
+    res.json({ ok:true, entries });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -3557,6 +3590,8 @@ function renderSKUChecklist(latestRes){
   const pct = totalItems ? Math.round((totalSet/totalItems)*100) : 0;
 
   const isToday = (SKU_STATE.viewDate === today);
+  // Lock: once today's checklist is submitted, treat today the same as a historical view (read-only)
+  const todayLocked = isToday && hasExisting;
   // ---- KPI summary at the very top ----
   const todayRow = (SKU_STATE.history || []).find(d => d.date === today);
   const statusBadge = !todayRow ? '<span style="background:#c33;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">NOT YET SUBMITTED</span>'
@@ -3623,7 +3658,11 @@ function renderSKUChecklist(latestRes){
     <div class="row" style="margin-bottom:10px">
       <div><label>From</label><input id="skuHistFrom" type="date" value="\${SKU_STATE.histFrom}"/></div>
       <div><label>To</label><input id="skuHistTo" type="date" value="\${SKU_STATE.histTo}"/></div>
-      <div style="display:flex;align-items:flex-end;gap:6px"><button id="skuHistApplyBtn">Apply</button><button id="skuViewTodayBtn" class="ghost">View Today</button></div>
+      <div style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap">
+        <button id="skuHistApplyBtn">Apply</button>
+        <button id="skuViewTodayBtn" class="ghost">View Today</button>
+        <button id="skuExportBtn" style="background:#345;color:#fff">&#128228; Export to Excel</button>
+      </div>
     </div>
     \${SKU_STATE.history.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:#eef">
@@ -3638,13 +3677,13 @@ function renderSKUChecklist(latestRes){
   </div>\`;
 
   // ---- Checklist header (date label + view mode indicator) ----
-  const checklistHeader = \`<div class="card" style="padding:12px 14px;background:\${isToday?'#f4faf6':'#fff8e1'};border-left:4px solid \${isToday?'#1f7a3a':'#e0a020'}">
+  const checklistHeader = \`<div class="card" style="padding:12px 14px;background:\${todayLocked||!isToday?'#fff8e1':'#f4faf6'};border-left:4px solid \${todayLocked||!isToday?'#e0a020':'#1f7a3a'}">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <b style="color:\${isToday?'#1f7a3a':'#a06800'}">\${isToday?'Today - '+today+' (editable)':'Viewing '+SKU_STATE.viewDate+' (read-only history)'}</b>
+      <b style="color:\${todayLocked||!isToday?'#a06800':'#1f7a3a'}">\${isToday ? (todayLocked ? 'Today - '+today+' (submitted - read-only)' : 'Today - '+today+' (editable)') : 'Viewing '+SKU_STATE.viewDate+' (read-only history)'}</b>
       \${!isToday?'<button class="sm ghost" onclick="viewSKUDate(\\''+today+'\\')">Switch to Today</button>':''}
-      \${isToday && hasExisting ? '<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>' : ''}
+      \${todayLocked ? '<span style="background:#1f7a3a;color:#fff;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">&#128274; LOCKED</span>' : ''}
     </div>
-    \${isToday?'<div style="margin-top:8px;font-size:12px;color:#5a4300"><b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Tap <b>Available</b> or <b>OOS</b> for every SKU.</div>':''}
+    \${isToday && !todayLocked?'<div style="margin-top:8px;font-size:12px;color:#5a4300"><b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Tap <b>Available</b> or <b>OOS</b> for every SKU. <b>Submission is one-shot - you cannot edit after sending.</b></div>':''}
     <div style="margin-top:8px;padding:8px;background:#fff;border-radius:6px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="flex:1;min-width:140px"><div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:\${pct}%;background:#1f7a3a;transition:width .2s"></div></div></div>
@@ -3653,9 +3692,9 @@ function renderSKUChecklist(latestRes){
     </div>
   </div>\`;
 
-  const submitCard = isToday ? \`<div class="card">
-    <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">\${hasExisting?'Update SKU Checklist':'Submit SKU Checklist'}</button>
-    <div id="skuErr" class="err" style="margin-top:8px"></div>
+  const submitCard = (isToday && !todayLocked) ? \`<div class="card">
+    <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">Submit SKU Checklist</button>
+    <div id="skuErr" class="err" style="margin-top:8px">Note: once submitted, you cannot edit this day's checklist.</div>
   </div>\` : '';
 
   $('#skuChkOut').innerHTML = kpiRow + trendCard + historyCard + checklistHeader + sectionsHtml + submitCard;
@@ -3663,11 +3702,13 @@ function renderSKUChecklist(latestRes){
   const ha = $('#skuHistApplyBtn'); if (ha) ha.onclick = () => { SKU_STATE.histFrom = $('#skuHistFrom').value; SKU_STATE.histTo = $('#skuHistTo').value; loadSKUChecklist(); };
   const vt = $('#skuViewTodayBtn'); if (vt) vt.onclick = () => { SKU_STATE.viewDate = todayStr(); loadSKUChecklist(); };
 
-  // If viewing a historical date, make all status buttons read-only (no onclick)
-  if (!isToday) {
+  // If viewing a historical date OR today is already locked, make all status buttons read-only
+  if (!isToday || todayLocked) {
     document.querySelectorAll('[data-sku][data-cat][data-val]').forEach(b => { b.onclick = null; b.style.cursor = 'default'; b.style.opacity = '0.9'; });
     document.querySelectorAll('[data-sku-remarks]').forEach(ta => { ta.readOnly = true; ta.style.background = '#fafafa'; });
   }
+
+  const exp = $('#skuExportBtn'); if (exp) exp.onclick = exportSKUHistoryExcel;
 }
 
 function viewSKUDate(date){
@@ -3714,6 +3755,73 @@ function setSKURemarks(ta){
 function toggleSKUCat(cat){
   SKU_STATE.expanded[cat] = !SKU_STATE.expanded[cat];
   renderSKUChecklist({ entries: [] });
+}
+
+async function exportSKUHistoryExcel(){
+  const btn = $('#skuExportBtn'); const orig = btn ? btn.textContent : ''; if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
+  try {
+    const r = await api('/api/sku-history-detail?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + encodeURIComponent(SKU_STATE.histFrom) + '&to=' + encodeURIComponent(SKU_STATE.histTo));
+    if (!r.ok) { alert(r.error || 'Export failed'); return; }
+    if (!r.entries.length) { alert('No submissions in this date range.'); return; }
+    const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6', OOS_C = '#c33';
+    // Summary table from history already in SKU_STATE.history
+    const summary = SKU_STATE.history.slice().sort((a,b) => b.date.localeCompare(a.date));
+    const sumRows = summary.map(d => \`<tr>
+      <td style="border:1px solid #cfd8d3;padding:6px 8px;font-weight:bold">\${escapeHtml(d.date)}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px;text-align:center;background:\${d.onTime?DARK:OOS_C};color:#fff;font-weight:bold;font-size:11px">\${d.onTime?'ON TIME':'LATE'}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px;text-align:center;color:\${DARK};font-weight:bold">\${d.available}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px;text-align:center;color:\${OOS_C};font-weight:bold">\${d.oos}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px;text-align:center">\${d.total}</td>
+      <td style="border:1px solid #cfd8d3;padding:6px 8px;color:#789;font-size:11px">\${new Date(d.timestamp).toLocaleString()}</td>
+    </tr>\`).join('');
+    // Detail table - group by date desc then category then rank
+    const byDate = {};
+    r.entries.forEach(e => { (byDate[e.date] = byDate[e.date] || []).push(e); });
+    const dates = Object.keys(byDate).sort((a,b) => b.localeCompare(a));
+    const detailRows = [];
+    dates.forEach(d => {
+      const items = byDate[d].slice().sort((a,b) => (a.category||'').localeCompare(b.category||'') || (a.rank||99) - (b.rank||99));
+      items.forEach((e,i) => detailRows.push(\`<tr>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px;font-weight:\${i===0?'bold':'normal'}">\${i===0?escapeHtml(d):''}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px">\${escapeHtml(e.category||'')}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px;text-align:center">#\${e.rank||'?'}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px">\${escapeHtml(e.sku||'')}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px">\${escapeHtml(e.description||'')}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px;text-align:center;background:\${e.status==='OOS'?OOS_C:DARK};color:#fff;font-weight:bold;font-size:11px">\${escapeHtml(e.status||'')}</td>
+        <td style="border:1px solid #cfd8d3;padding:4px 8px;font-size:11px">\${escapeHtml(e.remarks||'')}</td>
+      </tr>\`));
+    });
+    const html = \`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>SKU History</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>
+<body style="font-family:Calibri,Arial,sans-serif;padding:0;margin:0">
+  <div style="background:\${DARK};color:#fff;padding:14px 20px"><div style="font-size:20px;font-weight:bold">Focus 5 SKU Checklist - History Report</div><div style="font-size:12px;opacity:.9;margin-top:3px">\${escapeHtml(S.storeName||'')} &middot; by \${escapeHtml(S.manager||'')}</div></div>
+  <table style="border-collapse:collapse;margin:10px 0 16px;font-size:12px">
+    <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Date Range</td><td style="padding:6px 12px">\${SKU_STATE.histFrom} to \${SKU_STATE.histTo}</td></tr>
+    <tr><td style="padding:6px 12px;background:\${LIGHT_BG};font-weight:bold;color:\${DARKER}">Generated</td><td style="padding:6px 12px">\${new Date().toLocaleString()}</td></tr>
+  </table>
+  <div style="background:\${DARK};color:#fff;padding:8px 12px;font-weight:bold;font-size:13px">DAILY SUMMARY</div>
+  <table style="border-collapse:collapse;font-size:12px;margin-bottom:18px">
+    <thead><tr><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER};text-align:left">Date</th><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER}">Status</th><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER}">Available</th><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER}">OOS</th><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER}">Total</th><th style="background:\${DARK};color:#fff;padding:8px 10px;border:1px solid \${DARKER};text-align:left">Submitted At</th></tr></thead>
+    <tbody>\${sumRows}</tbody>
+  </table>
+  <div style="background:\${DARK};color:#fff;padding:8px 12px;font-weight:bold;font-size:13px">DETAILED SKU-LEVEL ENTRIES</div>
+  <table style="border-collapse:collapse;font-size:11px">
+    <thead><tr><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER};text-align:left">Date</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER};text-align:left">Category</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER}">Rank</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER};text-align:left">SKU</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER};text-align:left">Description</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER}">Status</th><th style="background:\${DARK};color:#fff;padding:6px 10px;border:1px solid \${DARKER};text-align:left">Remarks</th></tr></thead>
+    <tbody>\${detailRows.join('')}</tbody>
+  </table>
+</body></html>\`;
+    const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'SKU_Checklist_' + (S.storeName||'store').replace(/[^a-z0-9]+/gi,'_') + '_' + SKU_STATE.histFrom + '_to_' + SKU_STATE.histTo + '.xls';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export failed: ' + (e && e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
 }
 
 async function submitSKUChecklist(){

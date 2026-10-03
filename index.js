@@ -1499,8 +1499,8 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 
 <div id="loginScreen" class="card" style="max-width:480px;margin:40px auto">
   <div class="tabs" style="margin-bottom:12px">
-    <button id="tabLoginBtn" class="active" onclick="showAuthTab('login')">Login</button>
-    <button id="tabSignupBtn" onclick="showAuthTab('signup')">Sign Up</button>
+    <button id="tabLoginBtn" class="active">Login</button>
+    <button id="tabSignupBtn">Sign Up</button>
   </div>
   <div id="authLogin">
     <h2 style="margin:0 0 12px">Login</h2>
@@ -1717,6 +1717,9 @@ function showAuthTab(which){
   $('#tabLoginBtn').classList.toggle('active', isLogin);
   $('#tabSignupBtn').classList.toggle('active', !isLogin);
 }
+window.showAuthTab = showAuthTab; // expose for safety
+$('#tabLoginBtn').onclick = () => showAuthTab('login');
+$('#tabSignupBtn').onclick = () => showAuthTab('signup');
 
 async function doLogin(useLegacy){
   const u = $('#lu').value.trim(), p = $('#lp').value;

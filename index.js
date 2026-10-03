@@ -923,6 +923,41 @@ app.get('/api/sku-latest', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+app.get('/api/sku-history', async (req, res) => {
+  try {
+    const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
+    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const filtered = rows.filter(r =>
+      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      (!from || (r[4] || '') >= from) &&
+      (!to   || (r[4] || '') <= to)
+    );
+    // Pick latest ReportID per date, then collect its rows
+    const byDate = {};
+    filtered.forEach(r => {
+      const date = r[4];
+      if (!date) return;
+      if (!byDate[date] || r[1] > byDate[date].id) byDate[date] = { id: r[1], timestamp: r[0] };
+    });
+    const days = Object.entries(byDate).map(([date, obj]) => {
+      const rowsForDay = filtered.filter(r => r[4] === date && r[1] === obj.id);
+      const avail = rowsForDay.filter(r => r[9] === 'Available').length;
+      const oos   = rowsForDay.filter(r => r[9] === 'OOS').length;
+      const total = rowsForDay.length;
+      const sub = new Date(obj.timestamp);
+      const phHour = (sub.getUTCHours() + 8) % 24;
+      const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const onTime = (subDatePH < date) || (subDatePH === date && phHour < 10);
+      return { date, total, available: avail, oos, timestamp: obj.timestamp, onTime, reportId: obj.id };
+    }).sort((a,b) => b.date.localeCompare(a.date));
+    res.json({ ok:true, days });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.get('/api/am-stores', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
@@ -3436,15 +3471,20 @@ const skuGroupOf = (raw) => {
   if (u === 'PORK' || u === 'BEEF') return 'MEAT';
   return u;
 };
-let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true } };
+let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true }, histFrom:null, histTo:null, viewDate:null, history:[] };
 
 async function loadSKUChecklist(){
   $('#skuChkOut').innerHTML = '<div class="card muted">Loading SKUs...</div>';
   const today = todayStr();
-  const [skuRes, latestRes] = await Promise.all([
+  if (!SKU_STATE.histFrom) SKU_STATE.histFrom = todayStr(-29);
+  if (!SKU_STATE.histTo) SKU_STATE.histTo = today;
+  if (!SKU_STATE.viewDate) SKU_STATE.viewDate = today;
+  const [skuRes, latestRes, histRes] = await Promise.all([
     api('/api/sku-list?store=' + encodeURIComponent(S.storeName||'')),
-    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + today)
+    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate),
+    api('/api/sku-history?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
   ]);
+  SKU_STATE.history = (histRes && histRes.days) || [];
   if (!skuRes.ok){ $('#skuChkOut').innerHTML = '<div class="card err">'+escapeHtml(skuRes.error||'Failed to load SKUs')+'</div>'; return; }
   if (!skuRes.items || !skuRes.items.length){
     $('#skuChkOut').innerHTML = '<div class="card"><div style="padding:12px;color:#c33;font-weight:bold">No SKUs found for store "'+escapeHtml(S.storeName||'')+'" in Focus5SummarySKU sheet. Contact admin.</div></div>';
@@ -3516,34 +3556,123 @@ function renderSKUChecklist(latestRes){
   const totalAvail = Object.values(SKU_STATE.statuses).filter(v => v==='Available').length;
   const pct = totalItems ? Math.round((totalSet/totalItems)*100) : 0;
 
-  const headerCard = \`<div class="card">
-    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+  const isToday = (SKU_STATE.viewDate === today);
+  // ---- KPI summary at the very top ----
+  const todayRow = (SKU_STATE.history || []).find(d => d.date === today);
+  const statusBadge = !todayRow ? '<span style="background:#c33;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">NOT YET SUBMITTED</span>'
+    : todayRow.onTime ? '<span style="background:#1f7a3a;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">ON TIME</span>'
+    : '<span style="background:#c33;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">LATE</span>';
+  const kpi = (icon, num, lbl, bg) => \`<div style="flex:1 1 140px;min-width:0;background:\${bg};color:#fff;padding:14px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
+    <div style="font-size:20px;opacity:.9;line-height:1">\${icon}</div>
+    <div style="font-size:26px;font-weight:800;margin-top:6px;line-height:1">\${num}</div>
+    <div style="font-size:12px;opacity:.95;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px">\${lbl}</div>
+  </div>\`;
+  const kpiRow = \`<div class="card" style="padding:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
       <h3 style="margin:0;color:#1f7a3a">Focus 5 SKU Checklist</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${S.storeName||'(no store)'}</span>
       <span style="background:#eef;color:#334;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">\${today}</span>
-      \${hasExisting?'<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>':''}
+      \${statusBadge}
     </div>
-    <div style="margin-top:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
-      <b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Tap <b>Available</b> or <b>OOS</b> for every top-ranked SKU in each category. Add remarks if needed.
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      \${kpi('&#128202;', totalItems, 'Total SKUs', '#345')}
+      \${kpi('&#9989;',   totalAvail, 'Available today', '#1f7a3a')}
+      \${kpi('&#10060;',  totalOOS,   'OOS today', '#c33')}
+      \${kpi('&#128221;', (todayRow?todayRow.total:0), 'Submitted', '#345')}
     </div>
-    <div style="margin-top:10px;padding:10px;background:#f4faf6;border-radius:6px">
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <div style="flex:1;min-width:160px">
-          <div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:\${pct}%;background:#1f7a3a;transition:width .2s"></div></div>
-        </div>
-        <div style="font-weight:700;color:#1f7a3a;font-size:13px">\${totalSet} of \${totalItems} rated (\${pct}%)</div>
-        <div style="font-size:12px"><span style="color:#1f7a3a;font-weight:600">\${totalAvail} Available</span> &nbsp;·&nbsp; <span style="color:#c33;font-weight:600">\${totalOOS} OOS</span></div>
+  </div>\`;
+
+  // ---- Daily Trend chart ----
+  const days = SKU_STATE.history.slice().reverse(); // oldest -> newest
+  const maxBar = Math.max(1, ...days.map(d => d.total));
+  const barMax = Math.max(1, ...days.map(d => d.oos));
+  const trendBars = days.map(d => {
+    const h = Math.round((d.oos / Math.max(1, barMax)) * 90) + 4;
+    const barBg = d.oos === 0 ? '#1f7a3a' : d.oos < 5 ? '#e0a020' : '#c33';
+    const isSel = (d.date === SKU_STATE.viewDate) ? 'outline:2px solid #1f7a3a;outline-offset:1px' : '';
+    return \`<div onclick="viewSKUDate('\${d.date}')" title="\${d.date}: \${d.oos} OOS of \${d.total}" style="flex:1;min-width:28px;max-width:60px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer">
+      <div style="font-size:10px;color:#c33;font-weight:700">\${d.oos||''}</div>
+      <div style="width:100%;background:#eee;border-radius:3px;overflow:hidden;height:100px;display:flex;align-items:flex-end;\${isSel}">
+        <div style="width:100%;height:\${h}px;background:\${barBg}"></div>
+      </div>
+      <div style="font-size:9px;color:#789;text-align:center;line-height:1.1">\${d.date.slice(5)}</div>
+    </div>\`;
+  }).join('');
+  const trendCard = days.length ? \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">Daily OOS Trend</h3>
+      <span class="muted" style="font-size:12px">\${SKU_STATE.histFrom} to \${SKU_STATE.histTo} - click a day to view</span>
+    </div>
+    <div style="display:flex;gap:4px;overflow-x:auto;padding:4px 0">\${trendBars}</div>
+  </div>\` : '';
+
+  // ---- History filter + list ----
+  const histListRows = SKU_STATE.history.map(d => \`<tr onclick="viewSKUDate('\${d.date}')" style="cursor:pointer\${d.date===SKU_STATE.viewDate?';background:#e8f5ec':''}" onmouseover="this.style.background='#f4faf6'" onmouseout="this.style.background='\${d.date===SKU_STATE.viewDate?'#e8f5ec':''}'">
+    <td style="padding:6px 8px;font-weight:600;font-size:12px">\${d.date}\${d.date===today?' <span class="muted">(today)</span>':''}</td>
+    <td style="padding:6px 8px;text-align:center">\${d.onTime?'<span class="pill" style="background:#1f7a3a;font-size:10px">ON TIME</span>':'<span class="pill" style="background:#c33;font-size:10px">LATE</span>'}</td>
+    <td style="padding:6px 8px;text-align:center;color:#1f7a3a;font-weight:700;font-size:12px">\${d.available}</td>
+    <td style="padding:6px 8px;text-align:center;color:#c33;font-weight:700;font-size:12px">\${d.oos}</td>
+    <td style="padding:6px 8px;text-align:center;font-size:12px">\${d.total}</td>
+    <td style="padding:6px 8px;font-size:11px;color:#789">\${new Date(d.timestamp).toLocaleString()}</td>
+  </tr>\`).join('');
+  const historyCard = \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">History</h3>
+      <span class="muted" style="font-size:12px">pick a date range + click a row to view that day's checklist</span>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <div><label>From</label><input id="skuHistFrom" type="date" value="\${SKU_STATE.histFrom}"/></div>
+      <div><label>To</label><input id="skuHistTo" type="date" value="\${SKU_STATE.histTo}"/></div>
+      <div style="display:flex;align-items:flex-end;gap:6px"><button id="skuHistApplyBtn">Apply</button><button id="skuViewTodayBtn" class="ghost">View Today</button></div>
+    </div>
+    \${SKU_STATE.history.length ? \`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#eef">
+        <th style="padding:6px 8px;text-align:left">Date</th>
+        <th style="padding:6px;text-align:center;width:80px">Status</th>
+        <th style="padding:6px;text-align:center;width:70px">Available</th>
+        <th style="padding:6px;text-align:center;width:60px">OOS</th>
+        <th style="padding:6px;text-align:center;width:60px">Total</th>
+        <th style="padding:6px 8px;text-align:left">Submitted At</th>
+      </tr></thead>
+      <tbody>\${histListRows}</tbody></table></div>\` : '<div class="muted" style="padding:10px">No submissions in this range.</div>'}
+  </div>\`;
+
+  // ---- Checklist header (date label + view mode indicator) ----
+  const checklistHeader = \`<div class="card" style="padding:12px 14px;background:\${isToday?'#f4faf6':'#fff8e1'};border-left:4px solid \${isToday?'#1f7a3a':'#e0a020'}">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="color:\${isToday?'#1f7a3a':'#a06800'}">\${isToday?'Today - '+today+' (editable)':'Viewing '+SKU_STATE.viewDate+' (read-only history)'}</b>
+      \${!isToday?'<button class="sm ghost" onclick="viewSKUDate(\\''+today+'\\')">Switch to Today</button>':''}
+      \${isToday && hasExisting ? '<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>' : ''}
+    </div>
+    \${isToday?'<div style="margin-top:8px;font-size:12px;color:#5a4300"><b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Tap <b>Available</b> or <b>OOS</b> for every SKU.</div>':''}
+    <div style="margin-top:8px;padding:8px;background:#fff;border-radius:6px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:140px"><div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:\${pct}%;background:#1f7a3a;transition:width .2s"></div></div></div>
+        <div style="font-weight:700;color:#1f7a3a;font-size:12px">\${totalSet} of \${totalItems} rated (\${pct}%)</div>
       </div>
     </div>
   </div>\`;
 
-  const submitCard = \`<div class="card">
+  const submitCard = isToday ? \`<div class="card">
     <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">\${hasExisting?'Update SKU Checklist':'Submit SKU Checklist'}</button>
     <div id="skuErr" class="err" style="margin-top:8px"></div>
-  </div>\`;
+  </div>\` : '';
 
-  $('#skuChkOut').innerHTML = headerCard + sectionsHtml + submitCard;
-  $('#skuSubmitBtn').onclick = submitSKUChecklist;
+  $('#skuChkOut').innerHTML = kpiRow + trendCard + historyCard + checklistHeader + sectionsHtml + submitCard;
+  const sb = $('#skuSubmitBtn'); if (sb) sb.onclick = submitSKUChecklist;
+  const ha = $('#skuHistApplyBtn'); if (ha) ha.onclick = () => { SKU_STATE.histFrom = $('#skuHistFrom').value; SKU_STATE.histTo = $('#skuHistTo').value; loadSKUChecklist(); };
+  const vt = $('#skuViewTodayBtn'); if (vt) vt.onclick = () => { SKU_STATE.viewDate = todayStr(); loadSKUChecklist(); };
+
+  // If viewing a historical date, make all status buttons read-only (no onclick)
+  if (!isToday) {
+    document.querySelectorAll('[data-sku][data-cat][data-val]').forEach(b => { b.onclick = null; b.style.cursor = 'default'; b.style.opacity = '0.9'; });
+    document.querySelectorAll('[data-sku-remarks]').forEach(ta => { ta.readOnly = true; ta.style.background = '#fafafa'; });
+  }
+}
+
+function viewSKUDate(date){
+  SKU_STATE.viewDate = date;
+  loadSKUChecklist();
 }
 
 function skuRowHTML(it){

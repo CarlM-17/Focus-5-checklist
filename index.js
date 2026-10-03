@@ -1216,12 +1216,9 @@ app.get('/api/sku-rm-monitor', async (req, res) => {
     const date = (req.query.date || todayLocalPHstr()).trim();
     const todayStr = date;
 
-    // Authorized stores = ListOfStores where StoreID has a StoreManagers row
+    // SKU Checklist scope = ALL stores in ListOfStores (not limited to StoreManagers)
     const stores = await sheetsGet('ListOfStores!A2:G');
-    const smRows = await sheetsGet('StoreManagers!A2:C');
-    const smIds = new Set(smRows.map(r => String(r[0]||'').trim()).filter(Boolean));
     const authorizedStores = stores
-      .filter(r => smIds.has(String(r[3]||'').trim()))
       .map(r => ({ id: String(r[3]||'').trim(), name: (r[4]||'').trim(), area: (r[2]||'').trim() }))
       .filter(s => s.name);
 

@@ -851,6 +851,13 @@ app.get('/api/stock-monitor', async (req, res) => {
 
 // ---------- Focus 5 SKU Checklist ----------
 const SKU_STATUSES = ['Available', 'OOS'];
+const SKU_SLOTS = ['AM', 'PM'];
+// PH-hour deadlines per slot
+const SKU_SLOT_DEADLINE_HR = { AM: 10, PM: 15 };
+// Row shape: [0]ts [1]id [2]mgr [3]store [4]date [5]slot [6]cat [7]rank [8]sku [9]desc [10]status [11]remarks [12]recStatus
+const skuRowSlot = (r) => ((r[5] || 'AM') + '').trim().toUpperCase();
+const skuRowStatus = (r) => (r[10] || '').trim();
+const skuRowRecStatus = (r) => (r[12] || 'ACTIVE').trim();
 
 app.get('/api/sku-list', async (req, res) => {
   try {
@@ -867,7 +874,7 @@ app.get('/api/sku-list', async (req, res) => {
 });
 
 async function markSKUEdited(storeMgr, date, newId) {
-  const rows = await sheetsGet('SKUChecklistData!A2:L');
+  const rows = await sheetsGet('SKUChecklistData!A2:M');
   const data = [];
   rows.forEach((r, i) => {
     if ((r[11] || 'ACTIVE') !== 'ACTIVE') return;
@@ -881,31 +888,33 @@ async function markSKUEdited(storeMgr, date, newId) {
 
 app.post('/api/sku-submit', async (req, res) => {
   try {
-    const { storeMgr, store, date, entries } = req.body || {};
-    if (!storeMgr || !store || !date || !Array.isArray(entries) || !entries.length) {
+    const { storeMgr, store, date, slot, entries } = req.body || {};
+    if (!storeMgr || !store || !date || !slot || !Array.isArray(entries) || !entries.length) {
       return res.json({ ok:false, error:'Missing fields' });
     }
+    if (!SKU_SLOTS.includes(slot)) return res.json({ ok:false, error:'Invalid slot (must be AM or PM)' });
     for (const e of entries) {
       if (!SKU_STATUSES.includes(e.status)) return res.json({ ok:false, error:'Invalid status for SKU ' + (e.sku||'') });
     }
     const twoDaysAgo = new Date(Date.now() - 2*86400*1000).toISOString().slice(0,10);
     if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
-    // Lock once submitted: reject if an ACTIVE record already exists for this (storeMgr, date)
-    const existing = await sheetsGet('SKUChecklistData!A2:L');
+    // Lock per (mgr, date, slot): one submission per slot per day
+    const existing = await sheetsGet('SKUChecklistData!A2:M');
     const alreadySubmitted = existing.some(r =>
-      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      skuRowRecStatus(r) === 'ACTIVE' &&
       (r[2] || '').trim().toLowerCase() === storeMgr.trim().toLowerCase() &&
-      r[4] === date
+      r[4] === date &&
+      skuRowSlot(r) === slot
     );
-    if (alreadySubmitted) return res.json({ ok:false, error:'This date already has a submitted checklist. Submissions are locked once sent.' });
+    if (alreadySubmitted) return res.json({ ok:false, error: slot + ' slot for ' + date + ' is already submitted. Submissions are locked once sent.' });
     const ts = new Date().toISOString();
     const id = 'KS' + Date.now();
     const rows = entries.map(e => [
-      ts, id, storeMgr, store, date,
+      ts, id, storeMgr, store, date, slot,
       e.category || '', String(e.rank || ''), e.sku || '', e.description || '',
       e.status || '', e.remarks || '', 'ACTIVE'
     ]);
-    await sheetsAppend('SKUChecklistData!A1:L1', rows);
+    await sheetsAppend('SKUChecklistData!A1:M1', rows);
     res.json({ ok:true, reportId: id });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
@@ -914,18 +923,20 @@ app.get('/api/sku-latest', async (req, res) => {
   try {
     const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
     const date = (req.query.date || '').trim();
+    const slot = (req.query.slot || '').trim().toUpperCase();
     if (!storeMgr || !date) return res.json({ ok:false, error:'storeMgr and date required' });
-    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
-      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      skuRowRecStatus(r) === 'ACTIVE' &&
       (r[2] || '').trim().toLowerCase() === storeMgr &&
-      r[4] === date
+      r[4] === date &&
+      (!slot || skuRowSlot(r) === slot)
     );
     if (!filtered.length) return res.json({ ok:true, entries: [] });
     const latestId = filtered.reduce((max, r) => r[1] > max ? r[1] : max, '');
     const latest = filtered.filter(r => r[1] === latestId);
-    res.json({ ok:true, reportId: latestId, timestamp: latest[0][0],
-      entries: latest.map(r => ({ category:r[5], rank:parseInt(r[6])||0, sku:r[7], description:r[8], status:r[9], remarks:r[10] }))
+    res.json({ ok:true, reportId: latestId, timestamp: latest[0][0], slot: skuRowSlot(latest[0]),
+      entries: latest.map(r => ({ category:r[6], rank:parseInt(r[7])||0, sku:r[8], description:r[9], status:r[10], remarks:r[11] }))
     });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
@@ -936,32 +947,35 @@ app.get('/api/sku-history', async (req, res) => {
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
-    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
-      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      skuRowRecStatus(r) === 'ACTIVE' &&
       (r[2] || '').trim().toLowerCase() === storeMgr &&
       (!from || (r[4] || '') >= from) &&
       (!to   || (r[4] || '') <= to)
     );
-    // Pick latest ReportID per date, then collect its rows
-    const byDate = {};
+    // Pick latest ReportID per (date, slot)
+    const bySlot = {};
     filtered.forEach(r => {
-      const date = r[4];
+      const date = r[4]; const slot = skuRowSlot(r);
       if (!date) return;
-      if (!byDate[date] || r[1] > byDate[date].id) byDate[date] = { id: r[1], timestamp: r[0] };
+      const k = date + '||' + slot;
+      if (!bySlot[k] || r[1] > bySlot[k].id) bySlot[k] = { id: r[1], timestamp: r[0], date, slot };
     });
-    const days = Object.entries(byDate).map(([date, obj]) => {
-      const rowsForDay = filtered.filter(r => r[4] === date && r[1] === obj.id);
-      const avail = rowsForDay.filter(r => r[9] === 'Available').length;
-      const oos   = rowsForDay.filter(r => r[9] === 'OOS').length;
-      const total = rowsForDay.length;
+    // Aggregate per (date, slot)
+    const entries = Object.values(bySlot).map(obj => {
+      const rowsFor = filtered.filter(r => r[4] === obj.date && skuRowSlot(r) === obj.slot && r[1] === obj.id);
+      const avail = rowsFor.filter(r => skuRowStatus(r) === 'Available').length;
+      const oos   = rowsFor.filter(r => skuRowStatus(r) === 'OOS').length;
+      const total = rowsFor.length;
       const sub = new Date(obj.timestamp);
       const phHour = (sub.getUTCHours() + 8) % 24;
       const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
-      const onTime = (subDatePH < date) || (subDatePH === date && phHour < 10);
-      return { date, total, available: avail, oos, timestamp: obj.timestamp, onTime, reportId: obj.id };
-    }).sort((a,b) => b.date.localeCompare(a.date));
-    res.json({ ok:true, days });
+      const deadline = SKU_SLOT_DEADLINE_HR[obj.slot] || 10;
+      const onTime = (subDatePH < obj.date) || (subDatePH === obj.date && phHour < deadline);
+      return { date: obj.date, slot: obj.slot, total, available: avail, oos, timestamp: obj.timestamp, onTime, reportId: obj.id };
+    }).sort((a,b) => b.date.localeCompare(a.date) || a.slot.localeCompare(b.slot));
+    res.json({ ok:true, entries });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -971,21 +985,21 @@ app.get('/api/sku-history-detail', async (req, res) => {
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
-    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
-      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      skuRowRecStatus(r) === 'ACTIVE' &&
       (r[2] || '').trim().toLowerCase() === storeMgr &&
       (!from || (r[4] || '') >= from) &&
       (!to   || (r[4] || '') <= to)
     );
-    // Pick latest ReportID per date
-    const byDate = {};
-    filtered.forEach(r => { const d = r[4]; if (!d) return; if (!byDate[d] || r[1] > byDate[d]) byDate[d] = r[1]; });
+    // Pick latest ReportID per (date, slot)
+    const bySlot = {};
+    filtered.forEach(r => { const d = r[4]; const sl = skuRowSlot(r); if (!d) return; const k = d+'||'+sl; if (!bySlot[k] || r[1] > bySlot[k]) bySlot[k] = r[1]; });
     const entries = [];
     filtered.forEach(r => {
-      const d = r[4];
-      if (byDate[d] !== r[1]) return;
-      entries.push({ date:d, timestamp:r[0], store:r[3], category:r[5], rank:parseInt(r[6])||0, sku:r[7], description:r[8], status:r[9], remarks:r[10] });
+      const d = r[4]; const sl = skuRowSlot(r); const k = d+'||'+sl;
+      if (bySlot[k] !== r[1]) return;
+      entries.push({ date:d, slot:sl, timestamp:r[0], store:r[3], category:r[6], rank:parseInt(r[7])||0, sku:r[8], description:r[9], status:r[10], remarks:r[11] });
     });
     res.json({ ok:true, entries });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
@@ -3517,7 +3531,20 @@ async function loadSKUChecklist(){
     api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate),
     api('/api/sku-history?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
   ]);
-  SKU_STATE.history = (histRes && histRes.days) || [];
+  // Backend now returns per-slot entries. Convert to legacy "days" shape (one row per date, aggregating AM+PM) for existing render code.
+  const histEntries = (histRes && histRes.entries) || [];
+  const byDate = {};
+  histEntries.forEach(e => {
+    byDate[e.date] = byDate[e.date] || { date: e.date, total:0, available:0, oos:0, timestamp:e.timestamp, onTime:true, slots:{} };
+    byDate[e.date].total += e.total;
+    byDate[e.date].available += e.available;
+    byDate[e.date].oos += e.oos;
+    byDate[e.date].slots[e.slot] = e;
+    if (!e.onTime) byDate[e.date].onTime = false;
+    if (e.timestamp > byDate[e.date].timestamp) byDate[e.date].timestamp = e.timestamp;
+  });
+  SKU_STATE.history = Object.values(byDate).sort((a,b) => b.date.localeCompare(a.date));
+  SKU_STATE.histSlots = histEntries;
   if (!skuRes.ok){ $('#skuChkOut').innerHTML = '<div class="card err">'+escapeHtml(skuRes.error||'Failed to load SKUs')+'</div>'; return; }
   if (!skuRes.items || !skuRes.items.length){
     $('#skuChkOut').innerHTML = '<div class="card"><div style="padding:12px;color:#c33;font-weight:bold">No SKUs found for store "'+escapeHtml(S.storeName||'')+'" in Focus5SummarySKU sheet. Contact admin.</div></div>';
@@ -3842,9 +3869,11 @@ async function submitSKUChecklist(){
     return;
   }
   const date = todayStr();
+  const nowHr = new Date().getHours();
+  const slot = SKU_STATE.currentSlot || (nowHr < 10 ? 'AM' : 'PM');
   const btn = $('#skuSubmitBtn'); btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Submitting...';
   const r = await api('/api/sku-submit', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ storeMgr: S.manager, store: S.storeName, date, entries }) });
+    body: JSON.stringify({ storeMgr: S.manager, store: S.storeName, date, slot, entries }) });
   btn.disabled = false; btn.textContent = orig;
   if (!r.ok) { $('#skuErr').textContent = r.error || 'Failed'; return; }
   alert('Focus 5 SKU Checklist submitted - ' + entries.length + ' SKUs recorded');

@@ -122,6 +122,158 @@ async function sheetsBatchUpdateValues(data) {
 }
 
 // ---------- API ----------
+// ---------- Email-based user accounts (signup / approval / email login) ----------
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return 'scrypt$' + salt + '$' + derived;
+}
+function verifyPassword(password, stored) {
+  if (!stored || typeof stored !== 'string') return false;
+  if (!stored.startsWith('scrypt$')) return false;
+  const [, salt, hash] = stored.split('$');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(derived, 'hex'));
+}
+
+app.post('/api/signup', async (req, res) => {
+  try {
+    const { email, password, fullName } = req.body || {};
+    if (!email || !password || !fullName) return res.json({ ok:false, error:'Email, password and full name required' });
+    if (password.length < 6) return res.json({ ok:false, error:'Password must be at least 6 characters' });
+    const emailLc = String(email).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLc)) return res.json({ ok:false, error:'Invalid email format' });
+    const existing = await sheetsGet('UserAccounts!A2:I');
+    const dup = existing.some(r => (r[0]||'').trim().toLowerCase() === emailLc);
+    if (dup) return res.json({ ok:false, error:'This email is already registered' });
+    const row = [[emailLc, hashPassword(password), String(fullName).trim(), '', '', 'Pending', new Date().toISOString(), '', '']];
+    await sheetsAppend('UserAccounts!A1:I1', row);
+    res.json({ ok:true, message:'Signup received. Waiting for Regional Manager approval.' });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.post('/api/login-email', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    const emailLc = String(email || '').trim().toLowerCase();
+    if (!emailLc || !password) return res.json({ ok:false, error:'Email and password required' });
+    const rows = await sheetsGet('UserAccounts!A2:I');
+    const user = rows.find(r => (r[0]||'').trim().toLowerCase() === emailLc);
+    if (!user) return res.json({ ok:false, error:'Invalid email or password' });
+    if (!verifyPassword(password, user[1])) return res.json({ ok:false, error:'Invalid email or password' });
+    const status = (user[5] || '').trim();
+    if (status === 'Pending')  return res.json({ ok:false, error:'Your account is pending Regional Manager approval' });
+    if (status === 'Rejected') return res.json({ ok:false, error:'Your account was rejected. Contact the Regional Manager.' });
+    if (status !== 'Approved') return res.json({ ok:false, error:'Account not approved' });
+    const level = (user[3] || '').trim();
+    const linked = (user[4] || '').trim();
+    // Resolve storeName/area for Store Manager accounts via linked Store ID
+    let storeId = null, storeName = null, area = null;
+    if (level.toLowerCase() === 'store manager' && linked) {
+      const stores = await sheetsGet('ListOfStores!A2:G');
+      const storeRow = stores.find(r => String(r[3] || '').trim() === linked);
+      if (storeRow) { storeId = linked; storeName = (storeRow[4] || '').trim(); area = (storeRow[2] || '').trim(); }
+    }
+    res.json({
+      ok: true,
+      manager: linked || user[2] || emailLc,
+      level,
+      storeId, storeName, area,
+      email: emailLc,
+      fullName: user[2] || ''
+    });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/user-accounts', async (req, res) => {
+  try {
+    const requester = (req.query.email || '').trim().toLowerCase();
+    const rows = await sheetsGet('UserAccounts!A2:I');
+    // Confirm requester is an approved Regional Manager
+    const reqUser = rows.find(r => (r[0]||'').trim().toLowerCase() === requester);
+    if (!reqUser || (reqUser[5]||'').trim() !== 'Approved' || (reqUser[3]||'').trim().toLowerCase() !== 'regional manager') {
+      return res.json({ ok:false, error:'Only Regional Managers can view accounts' });
+    }
+    const accounts = rows.map((r,i) => ({
+      row: i + 2,
+      email: r[0], fullName: r[2], level: r[3], linkedUsername: r[4],
+      status: r[5] || 'Pending', submittedAt: r[6], approvedBy: r[7], approvedAt: r[8]
+    }));
+    // Also return available usernames to link to
+    const amRows = await sheetsGet('AreaManagers!A2:C');
+    const smRows = await sheetsGet('StoreManagers!A2:C');
+    const amUsernames = amRows.map(r => ({ username: r[0], level: r[2] || 'Area Manager' })).filter(x => x.username);
+    const smUsernames = smRows.map(r => ({ username: r[0], level: 'Store Manager', displayName: r[1] })).filter(x => x.username);
+    res.json({ ok:true, accounts, amUsernames, smUsernames });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+async function requireRegional(req) {
+  const requester = (req.body && req.body.requesterEmail || '').trim().toLowerCase();
+  if (!requester) return { ok:false, error:'requesterEmail required' };
+  const rows = await sheetsGet('UserAccounts!A2:I');
+  const reqUser = rows.find(r => (r[0]||'').trim().toLowerCase() === requester);
+  if (!reqUser || (reqUser[5]||'').trim() !== 'Approved' || (reqUser[3]||'').trim().toLowerCase() !== 'regional manager') {
+    return { ok:false, error:'Only Regional Managers can perform this action' };
+  }
+  return { ok:true, rows, requester };
+}
+
+app.post('/api/approve-account', async (req, res) => {
+  try {
+    const check = await requireRegional(req);
+    if (!check.ok) return res.json(check);
+    const { email, level, linkedUsername } = req.body || {};
+    if (!email || !level) return res.json({ ok:false, error:'email and level required' });
+    const rows = check.rows;
+    const idx = rows.findIndex(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
+    if (idx === -1) return res.json({ ok:false, error:'Account not found' });
+    const rowNum = idx + 2;
+    const data = [
+      { range: 'UserAccounts!D' + rowNum, values: [[level]] },
+      { range: 'UserAccounts!E' + rowNum, values: [[linkedUsername || '']] },
+      { range: 'UserAccounts!F' + rowNum, values: [['Approved']] },
+      { range: 'UserAccounts!H' + rowNum, values: [[check.requester]] },
+      { range: 'UserAccounts!I' + rowNum, values: [[new Date().toISOString()]] }
+    ];
+    await sheetsBatchUpdateValues(data);
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.post('/api/reject-account', async (req, res) => {
+  try {
+    const check = await requireRegional(req);
+    if (!check.ok) return res.json(check);
+    const { email } = req.body || {};
+    const idx = check.rows.findIndex(r => (r[0]||'').trim().toLowerCase() === String(email||'').trim().toLowerCase());
+    if (idx === -1) return res.json({ ok:false, error:'Account not found' });
+    const rowNum = idx + 2;
+    await sheetsBatchUpdateValues([
+      { range: 'UserAccounts!F' + rowNum, values: [['Rejected']] },
+      { range: 'UserAccounts!H' + rowNum, values: [[check.requester]] },
+      { range: 'UserAccounts!I' + rowNum, values: [[new Date().toISOString()]] }
+    ]);
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.post('/api/reset-password', async (req, res) => {
+  try {
+    const check = await requireRegional(req);
+    if (!check.ok) return res.json(check);
+    const { email, newPassword } = req.body || {};
+    if (!email || !newPassword || String(newPassword).length < 6) return res.json({ ok:false, error:'email + newPassword (6+ chars) required' });
+    const idx = check.rows.findIndex(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
+    if (idx === -1) return res.json({ ok:false, error:'Account not found' });
+    const rowNum = idx + 2;
+    await sheetsBatchUpdateValues([
+      { range: 'UserAccounts!B' + rowNum, values: [[hashPassword(newPassword)]] }
+    ]);
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
@@ -1285,13 +1437,32 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 <main>
 
 <div id="loginScreen" class="card">
-  <h2 style="margin-top:0">Area Manager Login</h2>
-  <label>Username</label>
-  <input id="lu" autocomplete="username"/>
-  <label>Password</label>
-  <input id="lp" type="password" autocomplete="current-password"/>
-  <div style="margin-top:12px"><button id="loginBtn">Login</button></div>
-  <div id="loginErr" class="err"></div>
+  <div class="tabs" style="margin-bottom:12px">
+    <button id="tabLoginBtn" class="active" onclick="showAuthTab('login')">Login</button>
+    <button id="tabSignupBtn" onclick="showAuthTab('signup')">Sign Up</button>
+  </div>
+  <div id="authLogin">
+    <h2 style="margin:0 0 12px">Login</h2>
+    <label>Email</label>
+    <input id="lu" type="email" autocomplete="username"/>
+    <label>Password</label>
+    <input id="lp" type="password" autocomplete="current-password"/>
+    <div style="margin-top:12px"><button id="loginBtn">Login</button> <button id="loginLegacyBtn" class="ghost" style="margin-left:8px">Legacy Login</button></div>
+    <div id="loginErr" class="err"></div>
+  </div>
+  <div id="authSignup" class="hidden">
+    <h2 style="margin:0 0 12px">Create Account</h2>
+    <label>Full Name</label>
+    <input id="suName" autocomplete="name"/>
+    <label>Email</label>
+    <input id="suEmail" type="email" autocomplete="email"/>
+    <label>Password <span class="muted" style="font-weight:400">(6+ characters)</span></label>
+    <input id="suPass" type="password" autocomplete="new-password"/>
+    <label>Confirm Password</label>
+    <input id="suPass2" type="password" autocomplete="new-password"/>
+    <div style="margin-top:12px"><button id="signupBtn">Create Account</button></div>
+    <div id="signupMsg" style="margin-top:8px;font-size:13px"></div>
+  </div>
 </div>
 
 <div id="appScreen" class="hidden">
@@ -1303,6 +1474,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <button data-tab="stock">Focus 5 Stock Status</button>
     <button data-tab="scheck">Store Check</button>
     <button data-tab="skuchk">Focus 5 SKU Checklist</button>
+    <button data-tab="users">User Approvals</button>
   </div>
 
   <div id="tabNew">
@@ -1382,6 +1554,10 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 
   <div id="tabSkuChk" class="hidden">
     <div id="skuChkOut"><div class="card muted">Loading...</div></div>
+  </div>
+
+  <div id="tabUsers" class="hidden">
+    <div id="usersOut"><div class="card muted">Loading...</div></div>
   </div>
 
   <div id="tabSCheck" class="hidden">
@@ -1469,22 +1645,50 @@ function todayStr(offsetDays){
 function $(q){return document.querySelector(q)}
 function api(url, opts){ return fetch(url, opts).then(r=>r.json()) }
 
-// ---- Login ----
-$('#loginBtn').onclick = async () => {
+// ---- Login (email first, legacy fallback) ----
+function showAuthTab(which){
+  const isLogin = which === 'login';
+  $('#authLogin').classList.toggle('hidden', !isLogin);
+  $('#authSignup').classList.toggle('hidden', isLogin);
+  $('#tabLoginBtn').classList.toggle('active', isLogin);
+  $('#tabSignupBtn').classList.toggle('active', !isLogin);
+}
+
+async function doLogin(useLegacy){
   const u = $('#lu').value.trim(), p = $('#lp').value;
   $('#loginErr').textContent = '';
-  const r = await api('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p})});
+  if (!u || !p) { $('#loginErr').textContent = 'Enter email and password'; return; }
+  const endpoint = useLegacy ? '/api/login' : '/api/login-email';
+  const body = useLegacy ? {username:u, password:p} : {email:u, password:p};
+  const r = await api(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   if (!r.ok) { $('#loginErr').textContent = r.error || 'Login failed'; return; }
   S.manager = r.manager; S.level = r.level || 'Area Manager';
   S.storeId = r.storeId || null; S.storeName = r.storeName || null;
+  S.email = r.email || null; S.fullName = r.fullName || null;
   localStorage.setItem('ff5_mgr', r.manager);
   localStorage.setItem('ff5_lvl', S.level);
   if (S.storeId) localStorage.setItem('ff5_sid', S.storeId); else localStorage.removeItem('ff5_sid');
   if (S.storeName) localStorage.setItem('ff5_sname', S.storeName); else localStorage.removeItem('ff5_sname');
+  if (S.email) localStorage.setItem('ff5_email', S.email); else localStorage.removeItem('ff5_email');
   await enterApp();
+}
+$('#loginBtn').onclick = () => doLogin(false);
+$('#loginLegacyBtn').onclick = () => doLogin(true);
+$('#signupBtn').onclick = async () => {
+  const name = $('#suName').value.trim(), email = $('#suEmail').value.trim(), p1 = $('#suPass').value, p2 = $('#suPass2').value;
+  const msg = $('#signupMsg');
+  msg.textContent = ''; msg.style.color = '#c33';
+  if (!name || !email || !p1) { msg.textContent = 'All fields required'; return; }
+  if (p1 !== p2) { msg.textContent = 'Passwords do not match'; return; }
+  if (p1.length < 6) { msg.textContent = 'Password must be at least 6 characters'; return; }
+  const r = await api('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:p1, fullName:name })});
+  if (!r.ok) { msg.textContent = r.error || 'Signup failed'; return; }
+  msg.style.color = '#1f7a3a';
+  msg.textContent = 'Account created. Waiting for Regional Manager approval. You will be able to log in once approved.';
+  $('#suName').value = ''; $('#suEmail').value = ''; $('#suPass').value = ''; $('#suPass2').value = '';
 };
 
-$('#logoutBtn').onclick = () => { ['ff5_mgr','ff5_lvl','ff5_sid','ff5_sname'].forEach(k=>localStorage.removeItem(k)); location.reload(); };
+$('#logoutBtn').onclick = () => { ['ff5_mgr','ff5_lvl','ff5_sid','ff5_sname','ff5_email'].forEach(k=>localStorage.removeItem(k)); location.reload(); };
 
 async function enterApp(){
   $('#loginScreen').classList.add('hidden');
@@ -1522,6 +1726,8 @@ function applyRoleUI(){
   show('.tabs button[data-tab="stock"]', !isStoreMgr);
   show('.tabs button[data-tab="scheck"]', isStoreMgr);
   show('.tabs button[data-tab="skuchk"]', isStoreMgr);
+  const isRegional = (S.level||'').toLowerCase() === 'regional manager';
+  show('.tabs button[data-tab="users"]', isRegional);
 }
 
 // Slot windows: earliest .. deadline (local time hours, 24h)
@@ -1663,8 +1869,10 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
   $('#tabStock').classList.toggle('hidden', t!=='stock');
   $('#tabSkuChk').classList.toggle('hidden', t!=='skuchk');
+  $('#tabUsers').classList.toggle('hidden', t!=='users');
   if (t==='stock') { const lvl=(S.level||'').toLowerCase(); if (lvl==='area manager') loadReviewTab(); else loadStockTab(); }
   if (t==='skuchk') loadSKUChecklist();
+  if (t==='users') loadUserApprovalsTab();
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
   if (t==='mon') { if(!$('#monFrom').value){ $('#monFrom').value = todayStr(-14); $('#monTo').value = todayStr(); } loadMonitor(); }
@@ -4307,6 +4515,103 @@ async function submitSKUChecklist(){
   loadSKUChecklist();
 }
 
+// ---- User Approvals (Regional Manager only) ----
+async function loadUserApprovalsTab(){
+  const out = $('#usersOut');
+  out.innerHTML = '<div class="card muted">Loading accounts...</div>';
+  const r = await api('/api/user-accounts?email=' + encodeURIComponent(S.email || ''));
+  if (!r.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+  const pending  = r.accounts.filter(a => a.status === 'Pending');
+  const approved = r.accounts.filter(a => a.status === 'Approved');
+  const rejected = r.accounts.filter(a => a.status === 'Rejected');
+  const amOpts = r.amUsernames.map(x => '<option value="'+escapeHtml(x.username)+'">'+escapeHtml(x.username)+' ('+escapeHtml(x.level)+')</option>').join('');
+  const smOpts = r.smUsernames.map(x => '<option value="'+escapeHtml(x.username)+'">'+escapeHtml(x.username)+' - '+escapeHtml(x.displayName||'')+'</option>').join('');
+
+  const pendRows = pending.map(a => \`<tr>
+    <td style="padding:6px 8px;border:1px solid #eee"><b>\${escapeHtml(a.fullName||'')}</b><div style="font-size:11px;color:#789">\${escapeHtml(a.email||'')}</div></td>
+    <td style="padding:6px;border:1px solid #eee">
+      <select class="ua-level" data-email="\${escapeHtml(a.email)}" style="width:100%">
+        <option value="">-- select --</option>
+        <option value="Regional Manager">Regional Manager</option>
+        <option value="Area Manager">Area Manager</option>
+        <option value="Store Manager">Store Manager</option>
+      </select>
+    </td>
+    <td style="padding:6px;border:1px solid #eee">
+      <select class="ua-link" data-email="\${escapeHtml(a.email)}" style="width:100%">
+        <option value="">(no link - new user)</option>
+        <optgroup label="Area/Regional Managers">\${amOpts}</optgroup>
+        <optgroup label="Store Managers (Store ID)">\${smOpts}</optgroup>
+      </select>
+    </td>
+    <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.submittedAt?new Date(a.submittedAt).toLocaleString():''}</td>
+    <td style="padding:6px;border:1px solid #eee;white-space:nowrap">
+      <button class="ua-approve" data-email="\${escapeHtml(a.email)}" style="background:#1f7a3a;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Approve</button>
+      <button class="ua-reject" data-email="\${escapeHtml(a.email)}" style="background:#c33;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px;margin-left:4px">Reject</button>
+    </td>
+  </tr>\`).join('');
+
+  const apprRows = approved.map(a => \`<tr>
+    <td style="padding:6px 8px;border:1px solid #eee"><b>\${escapeHtml(a.fullName||'')}</b><div style="font-size:11px;color:#789">\${escapeHtml(a.email||'')}</div></td>
+    <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(a.level||'')}</td>
+    <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(a.linkedUsername||'(no link)')}</td>
+    <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.approvedAt?new Date(a.approvedAt).toLocaleString():''}<br>by \${escapeHtml(a.approvedBy||'')}</td>
+    <td style="padding:6px;border:1px solid #eee"><button class="ua-reset" data-email="\${escapeHtml(a.email)}" style="background:#345;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Reset Password</button></td>
+  </tr>\`).join('');
+
+  const rejRows = rejected.map(a => \`<tr style="background:#fff5f5">
+    <td style="padding:6px 8px;border:1px solid #eee"><b>\${escapeHtml(a.fullName||'')}</b><div style="font-size:11px;color:#789">\${escapeHtml(a.email||'')}</div></td>
+    <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.approvedAt?new Date(a.approvedAt).toLocaleString():''}<br>by \${escapeHtml(a.approvedBy||'')}</td>
+  </tr>\`).join('');
+
+  out.innerHTML = \`
+    <div class="card">
+      <h3 style="margin:0;color:#1f7a3a">User Account Approvals</h3>
+      <div class="muted" style="font-size:12px;margin-top:4px">Approve new signups and link them to their existing username so historical data stays attached. Only Regional Managers can access.</div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px;color:#c33">Pending (\${pending.length})</h3>
+      \${pending.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Level</th><th style="padding:6px 8px;text-align:left">Link to existing username</th><th style="padding:6px 8px;text-align:left">Signed up</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+pendRows+'</tbody></table></div>' : '<div class="muted">No pending accounts.</div>'}
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px;color:#1f7a3a">Approved (\${approved.length})</h3>
+      \${approved.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Level</th><th style="padding:6px 8px;text-align:left">Linked Username</th><th style="padding:6px 8px;text-align:left">Approved</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+apprRows+'</tbody></table></div>' : '<div class="muted">No approved accounts yet.</div>'}
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px;color:#789">Rejected (\${rejected.length})</h3>
+      \${rejected.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Rejected</th></tr></thead><tbody>'+rejRows+'</tbody></table></div>' : '<div class="muted">No rejected accounts.</div>'}
+    </div>
+  \`;
+
+  document.querySelectorAll('.ua-approve').forEach(b => b.onclick = async () => {
+    const email = b.dataset.email;
+    const level = document.querySelector('.ua-level[data-email="'+email+'"]').value;
+    const link  = document.querySelector('.ua-link[data-email="'+email+'"]').value;
+    if (!level) { alert('Pick a level first'); return; }
+    const r = await api('/api/approve-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email, level, linkedUsername:link })});
+    if (!r.ok) { alert(r.error||'Failed'); return; }
+    loadUserApprovalsTab();
+  });
+  document.querySelectorAll('.ua-reject').forEach(b => b.onclick = async () => {
+    const email = b.dataset.email;
+    if (!confirm('Reject '+email+'? They will not be able to log in.')) return;
+    const r = await api('/api/reject-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email })});
+    if (!r.ok) { alert(r.error||'Failed'); return; }
+    loadUserApprovalsTab();
+  });
+  document.querySelectorAll('.ua-reset').forEach(b => b.onclick = async () => {
+    const email = b.dataset.email;
+    const np = prompt('New password for ' + email + ' (6+ chars):');
+    if (!np || np.length < 6) { alert('Need 6+ characters'); return; }
+    const r = await api('/api/reset-password', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email, newPassword:np })});
+    if (!r.ok) { alert(r.error||'Failed'); return; }
+    alert('Password reset done. Share the new password with ' + email);
+  });
+}
+
 // Auto-login if remembered
 const remembered = localStorage.getItem('ff5_mgr');
 if (remembered) {
@@ -4314,6 +4619,7 @@ if (remembered) {
   S.level = localStorage.getItem('ff5_lvl') || 'Area Manager';
   S.storeId = localStorage.getItem('ff5_sid') || null;
   S.storeName = localStorage.getItem('ff5_sname') || null;
+  S.email = localStorage.getItem('ff5_email') || null;
   enterApp();
 }
 </script>

@@ -1112,10 +1112,15 @@ const skuRowRecStatus = (r) => (r[12] || 'ACTIVE').trim();
 
 app.get('/api/sku-list', async (req, res) => {
   try {
+    const storeId = String(req.query.storeId || '').trim();
     const store = (req.query.store || '').trim();
-    if (!store) return res.json({ ok:false, error:'store required' });
+    if (!storeId && !store) return res.json({ ok:false, error:'storeId or store required' });
     const rows = await sheetsGet('Focus5SummarySKU!A2:H');
-    const filtered = rows.filter(r => (r[1] || '').trim().toLowerCase() === store.toLowerCase());
+    const filtered = rows.filter(r => {
+      // Primary: match by Store ID (col A on Focus5SummarySKU == col D on ListOfStores)
+      if (storeId && String(r[0] || '').trim() === storeId) return true;
+      return false;
+    });
     const items = filtered.map(r => ({
       storeCode: r[0], storeName: r[1], rank: parseInt(r[2]) || 0,
       sku: r[3], description: r[4], supplier: r[5], skuType: r[6], category: (r[7]||'').trim()
@@ -4732,7 +4737,7 @@ async function loadSKUChecklist(){
   if (!SKU_STATE.viewDate) SKU_STATE.viewDate = today;
   if (!SKU_STATE.currentSlot) SKU_STATE.currentSlot = autoSKUSlot();
   const [skuRes, latestRes, histRes] = await Promise.all([
-    api('/api/sku-list?store=' + encodeURIComponent(S.storeName||'')),
+    api('/api/sku-list?storeId=' + encodeURIComponent(S.storeId||'') + '&store=' + encodeURIComponent(S.storeName||'')),
     api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate + '&slot=' + SKU_STATE.currentSlot),
     api('/api/sku-history?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
   ]);

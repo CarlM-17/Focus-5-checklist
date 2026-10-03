@@ -140,15 +140,16 @@ function verifyPassword(password, stored) {
 
 app.post('/api/signup', async (req, res) => {
   try {
-    const { email, password, fullName } = req.body || {};
-    if (!email || !password || !fullName) return res.json({ ok:false, error:'Email, password and full name required' });
+    const { email, password, fullName, level } = req.body || {};
+    if (!email || !password || !fullName || !level) return res.json({ ok:false, error:'Email, password, full name and position are required' });
+    if (!['Regional Manager','Area Manager','Store Manager'].includes(level)) return res.json({ ok:false, error:'Invalid position' });
     if (password.length < 6) return res.json({ ok:false, error:'Password must be at least 6 characters' });
     const emailLc = String(email).trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLc)) return res.json({ ok:false, error:'Invalid email format' });
     const existing = await sheetsGet('UserAccounts!A2:I');
     const dup = existing.some(r => (r[0]||'').trim().toLowerCase() === emailLc);
     if (dup) return res.json({ ok:false, error:'This email is already registered' });
-    const row = [[emailLc, hashPassword(password), String(fullName).trim(), '', '', 'Pending', new Date().toISOString(), '', '']];
+    const row = [[emailLc, hashPassword(password), String(fullName).trim(), level, '', 'Pending', new Date().toISOString(), '', '']];
     await sheetsAppend('UserAccounts!A1:I1', row);
     res.json({ ok:true, message:'Signup received. Waiting for Regional Manager approval.' });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
@@ -187,15 +188,29 @@ app.post('/api/login-email', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// Check if a requester is a Regional Manager — accepts either an approved email account OR a legacy AreaManagers row
+async function isRegionalManager(email, username) {
+  if (email) {
+    const rows = await sheetsGet('UserAccounts!A2:I');
+    const u = rows.find(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
+    if (u && (u[5]||'').trim() === 'Approved' && (u[3]||'').trim().toLowerCase() === 'regional manager') return true;
+  }
+  if (username) {
+    const am = await sheetsGet('AreaManagers!A2:C');
+    const u = am.find(r => (r[0]||'').trim().toLowerCase() === String(username).trim().toLowerCase());
+    if (u && (u[2]||'').trim().toLowerCase() === 'regional manager') return true;
+  }
+  return false;
+}
+
 app.get('/api/user-accounts', async (req, res) => {
   try {
-    const requester = (req.query.email || '').trim().toLowerCase();
-    const rows = await sheetsGet('UserAccounts!A2:I');
-    // Confirm requester is an approved Regional Manager
-    const reqUser = rows.find(r => (r[0]||'').trim().toLowerCase() === requester);
-    if (!reqUser || (reqUser[5]||'').trim() !== 'Approved' || (reqUser[3]||'').trim().toLowerCase() !== 'regional manager') {
+    const email = (req.query.email || '').trim().toLowerCase();
+    const username = (req.query.username || '').trim();
+    if (!(await isRegionalManager(email, username))) {
       return res.json({ ok:false, error:'Only Regional Managers can view accounts' });
     }
+    const rows = await sheetsGet('UserAccounts!A2:I');
     const accounts = rows.map((r,i) => ({
       row: i + 2,
       email: r[0], fullName: r[2], level: r[3], linkedUsername: r[4],
@@ -211,14 +226,13 @@ app.get('/api/user-accounts', async (req, res) => {
 });
 
 async function requireRegional(req) {
-  const requester = (req.body && req.body.requesterEmail || '').trim().toLowerCase();
-  if (!requester) return { ok:false, error:'requesterEmail required' };
-  const rows = await sheetsGet('UserAccounts!A2:I');
-  const reqUser = rows.find(r => (r[0]||'').trim().toLowerCase() === requester);
-  if (!reqUser || (reqUser[5]||'').trim() !== 'Approved' || (reqUser[3]||'').trim().toLowerCase() !== 'regional manager') {
+  const email = ((req.body && req.body.requesterEmail) || '').trim().toLowerCase();
+  const username = ((req.body && req.body.requesterUsername) || '').trim();
+  if (!(await isRegionalManager(email, username))) {
     return { ok:false, error:'Only Regional Managers can perform this action' };
   }
-  return { ok:true, rows, requester };
+  const rows = await sheetsGet('UserAccounts!A2:I');
+  return { ok:true, rows, requester: email || username };
 }
 
 app.post('/api/approve-account', async (req, res) => {
@@ -1574,6 +1588,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
       <div id="authSignup" style="display:none">
         <div class="auth-field"><label>Full name <span class="req">*</span></label><input id="suName" autocomplete="name"/></div>
         <div class="auth-field"><label>Email <span class="req">*</span></label><input id="suEmail" type="email" autocomplete="email"/></div>
+        <div class="auth-field"><label>Position <span class="req">*</span></label><select id="suLevel"><option value="">-- select your position --</option><option value="Regional Manager">Regional Manager</option><option value="Area Manager">Area Manager</option><option value="Store Manager">Store Manager</option></select></div>
         <div class="auth-field"><label>Password <span class="req">*</span> <span style="color:#789;font-weight:400">(6+ characters)</span></label><div class="pw-wrap"><input id="suPass" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass">&#128065;</button></div></div>
         <div class="auth-field"><label>Confirm password <span class="req">*</span></label><div class="pw-wrap"><input id="suPass2" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass2">&#128065;</button></div></div>
         <button id="signupBtn" class="btn-primary" type="button">Create account</button>
@@ -1815,17 +1830,17 @@ async function doLogin(useLegacy){
 $('#loginBtn').onclick = () => doLogin(false);
 $('#loginLegacyBtn').onclick = () => doLogin(true);
 $('#signupBtn').onclick = async () => {
-  const name = $('#suName').value.trim(), email = $('#suEmail').value.trim(), p1 = $('#suPass').value, p2 = $('#suPass2').value;
+  const name = $('#suName').value.trim(), email = $('#suEmail').value.trim(), level = $('#suLevel').value, p1 = $('#suPass').value, p2 = $('#suPass2').value;
   const msg = $('#signupMsg');
   msg.textContent = ''; msg.style.color = '#c33';
-  if (!name || !email || !p1) { msg.textContent = 'All fields required'; return; }
+  if (!name || !email || !level || !p1) { msg.textContent = 'All fields required (including Position)'; return; }
   if (p1 !== p2) { msg.textContent = 'Passwords do not match'; return; }
   if (p1.length < 6) { msg.textContent = 'Password must be at least 6 characters'; return; }
-  const r = await api('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:p1, fullName:name })});
+  const r = await api('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:p1, fullName:name, level })});
   if (!r.ok) { msg.textContent = r.error || 'Signup failed'; return; }
   msg.style.color = '#1f7a3a';
   msg.textContent = 'Account created. Waiting for Regional Manager approval. You will be able to log in once approved.';
-  $('#suName').value = ''; $('#suEmail').value = ''; $('#suPass').value = ''; $('#suPass2').value = '';
+  $('#suName').value = ''; $('#suEmail').value = ''; $('#suLevel').value = ''; $('#suPass').value = ''; $('#suPass2').value = '';
 };
 
 $('#logoutBtn').onclick = () => { ['ff5_mgr','ff5_lvl','ff5_sid','ff5_sname','ff5_email'].forEach(k=>localStorage.removeItem(k)); location.reload(); };
@@ -4659,7 +4674,7 @@ async function submitSKUChecklist(){
 async function loadUserApprovalsTab(){
   const out = $('#usersOut');
   out.innerHTML = '<div class="card muted">Loading accounts...</div>';
-  const r = await api('/api/user-accounts?email=' + encodeURIComponent(S.email || ''));
+  const r = await api('/api/user-accounts?email=' + encodeURIComponent(S.email || '') + '&username=' + encodeURIComponent(S.manager || ''));
   if (!r.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
   const pending  = r.accounts.filter(a => a.status === 'Pending');
   const approved = r.accounts.filter(a => a.status === 'Approved');
@@ -4731,14 +4746,14 @@ async function loadUserApprovalsTab(){
     const level = document.querySelector('.ua-level[data-email="'+email+'"]').value;
     const link  = document.querySelector('.ua-link[data-email="'+email+'"]').value;
     if (!level) { alert('Pick a level first'); return; }
-    const r = await api('/api/approve-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email, level, linkedUsername:link })});
+    const r = await api('/api/approve-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email, level, linkedUsername:link })});
     if (!r.ok) { alert(r.error||'Failed'); return; }
     loadUserApprovalsTab();
   });
   document.querySelectorAll('.ua-reject').forEach(b => b.onclick = async () => {
     const email = b.dataset.email;
     if (!confirm('Reject '+email+'? They will not be able to log in.')) return;
-    const r = await api('/api/reject-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email })});
+    const r = await api('/api/reject-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email })});
     if (!r.ok) { alert(r.error||'Failed'); return; }
     loadUserApprovalsTab();
   });
@@ -4746,7 +4761,7 @@ async function loadUserApprovalsTab(){
     const email = b.dataset.email;
     const np = prompt('New password for ' + email + ' (6+ chars):');
     if (!np || np.length < 6) { alert('Need 6+ characters'); return; }
-    const r = await api('/api/reset-password', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, email, newPassword:np })});
+    const r = await api('/api/reset-password', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email, newPassword:np })});
     if (!r.ok) { alert(r.error||'Failed'); return; }
     alert('Password reset done. Share the new password with ' + email);
   });

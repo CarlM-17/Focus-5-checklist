@@ -1478,7 +1478,47 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 .hist .meta{font-size:12px;color:#456;margin-top:2px}
 .pill{display:inline-block;padding:3px 10px;border-radius:99px;background:#1f7a3a;color:#fff;font-size:12px;font-weight:700}
 .err{color:#c33;margin-top:8px;font-size:13px}
-.hidden{display:none}
+.hidden{display:none !important}
+/* ---------- Split-screen auth ---------- */
+.auth-split{display:flex;min-height:100vh;background:#fff;align-items:stretch}
+.auth-left{background:linear-gradient(135deg,#082415 0%,#0e3a1c 35%,#1f7a3a 100%);color:#fff;flex:1 1 50%;padding:48px 56px;display:flex;flex-direction:column;justify-content:space-between;gap:40px}
+.auth-right{flex:1 1 50%;padding:48px;display:flex;align-items:center;justify-content:center;background:#fff}
+.auth-brand{display:flex;align-items:center;gap:12px}
+.auth-logo{width:44px;height:44px;background:url('/Focus5_icon.png') center/contain no-repeat;background-color:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.auth-brand-name{font-weight:700;font-size:18px;letter-spacing:.3px;line-height:1.1}
+.auth-brand-sub{font-size:11px;opacity:.9;color:#FFC107;letter-spacing:.5px;text-transform:uppercase;font-weight:700;margin-top:2px}
+.auth-hero{font-size:36px;line-height:1.2;font-weight:700;max-width:460px;margin:0;letter-spacing:-.4px}
+.auth-bullets{list-style:none;padding:0;margin:16px 0 0;display:flex;flex-direction:column;gap:14px;max-width:460px}
+.auth-bullets li{display:flex;align-items:flex-start;gap:12px;font-size:14px;line-height:1.5;opacity:.95}
+.auth-bullets li::before{content:'';display:inline-block;width:22px;height:22px;background:#FFC107;border-radius:50%;flex-shrink:0;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23082415' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>");background-size:14px;background-position:center;background-repeat:no-repeat}
+.auth-foot{font-size:11px;opacity:.65;letter-spacing:.3px}
+.auth-card{max-width:420px;width:100%}
+.auth-title{font-size:28px;margin:0 0 4px;color:#0e3a1c;letter-spacing:-.3px;font-weight:700}
+.auth-sub{font-size:14px;color:#5e6b64;margin:0 0 24px}
+.auth-tabs{display:flex;margin-bottom:20px;border-bottom:1px solid #e3eae5}
+.auth-tab{flex:1;background:transparent;color:#5e6b64;border:0;border-bottom:3px solid transparent;padding:12px;font-weight:600;cursor:pointer;border-radius:0;box-shadow:none;min-height:auto;font-size:14px}
+.auth-tab:hover{color:#1f7a3a}
+.auth-tab.active{color:#1f7a3a;border-bottom-color:#FFC107}
+.auth-field{margin-top:14px}
+.auth-field label{display:block;font-size:12px;color:#5e6b64;margin-bottom:6px;font-weight:500}
+.auth-field label .req{color:#c33}
+.pw-wrap{position:relative}
+.pw-wrap input{padding-right:44px}
+.pw-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:transparent;border:0;padding:8px;cursor:pointer;color:#789;min-height:auto;box-shadow:none;font-size:18px;line-height:1}
+.pw-toggle:hover{color:#1f7a3a}
+.btn-primary{width:100%;background:#1f7a3a;color:#fff;padding:14px;border:0;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;margin-top:18px;box-shadow:0 2px 8px rgba(31,122,58,.2)}
+.btn-primary:hover{background:#155a2b}
+.btn-ghost{width:100%;background:transparent;color:#1f7a3a;border:1px solid #d3dcd5;padding:10px;border-radius:8px;margin-top:10px;font-weight:600;cursor:pointer;box-shadow:none}
+.btn-ghost:hover{background:#f4faf6}
+.auth-help{margin-top:20px;font-size:12px;color:#5e6b64;text-align:center;line-height:1.5}
+.auth-help b{color:#0e3a1c}
+@media (max-width:800px){
+  .auth-split{flex-direction:column;min-height:auto}
+  .auth-left{padding:28px 24px;gap:24px}
+  .auth-right{padding:24px}
+  .auth-hero{font-size:24px}
+  .auth-bullets{font-size:13px}
+}
 .muted{color:#789;font-size:12px}
 /* Small phones */
 @media (max-width:360px){
@@ -1497,33 +1537,51 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 
 <main>
 
-<div id="loginScreen" class="card" style="max-width:480px;margin:40px auto">
-  <div class="tabs" style="margin-bottom:12px">
-    <button id="tabLoginBtn" class="active">Login</button>
-    <button id="tabSignupBtn">Sign Up</button>
-  </div>
-  <div id="authLogin">
-    <h2 style="margin:0 0 12px">Login</h2>
-    <label>Email</label>
-    <input id="lu" type="email" autocomplete="username"/>
-    <label>Password</label>
-    <input id="lp" type="password" autocomplete="current-password"/>
-    <div style="margin-top:12px"><button id="loginBtn">Login</button> <button id="loginLegacyBtn" class="ghost" style="margin-left:8px">Legacy Login</button></div>
-    <div id="loginErr" class="err"></div>
-  </div>
-  <div id="authSignup" class="hidden">
-    <h2 style="margin:0 0 12px">Create Account</h2>
-    <label>Full Name</label>
-    <input id="suName" autocomplete="name"/>
-    <label>Email</label>
-    <input id="suEmail" type="email" autocomplete="email"/>
-    <label>Password <span class="muted" style="font-weight:400">(6+ characters)</span></label>
-    <input id="suPass" type="password" autocomplete="new-password"/>
-    <label>Confirm Password</label>
-    <input id="suPass2" type="password" autocomplete="new-password"/>
-    <div style="margin-top:12px"><button id="signupBtn">Create Account</button></div>
-    <div id="signupMsg" style="margin-top:8px;font-size:13px"></div>
-  </div>
+<div id="loginScreen" class="auth-split">
+  <aside class="auth-left">
+    <div class="auth-brand">
+      <div class="auth-logo"></div>
+      <div>
+        <div class="auth-brand-name">Focus 5</div>
+        <div class="auth-brand-sub">Checklist &amp; Compliance</div>
+      </div>
+    </div>
+    <div>
+      <h1 class="auth-hero">Daily store checklists and stock status, in one place.</h1>
+      <ul class="auth-bullets">
+        <li>Store Managers submit SKU and stock-status checklists on time</li>
+        <li>Area Managers review and validate each store's submission</li>
+        <li>Regional Managers see real-time compliance and chronic issues</li>
+      </ul>
+    </div>
+    <div class="auth-foot">Internal business system &middot; Authorized users only</div>
+  </aside>
+  <section class="auth-right">
+    <div class="auth-card">
+      <h2 class="auth-title" id="authTitle">Sign in</h2>
+      <p class="auth-sub" id="authSubtitle">Use the email and password you registered with.</p>
+      <div class="auth-tabs">
+        <button id="tabLoginBtn" class="auth-tab active" type="button">Sign in</button>
+        <button id="tabSignupBtn" class="auth-tab" type="button">Create account</button>
+      </div>
+      <div id="authLogin">
+        <div class="auth-field"><label>Email <span class="req">*</span></label><input id="lu" type="email" autocomplete="username"/></div>
+        <div class="auth-field"><label>Password <span class="req">*</span></label><div class="pw-wrap"><input id="lp" type="password" autocomplete="current-password"/><button type="button" class="pw-toggle" data-pw-target="lp">&#128065;</button></div></div>
+        <button id="loginBtn" class="btn-primary" type="button">Sign in</button>
+        <button id="loginLegacyBtn" class="btn-ghost" type="button">Legacy Login (temporary)</button>
+        <div id="loginErr" class="err" style="margin-top:10px"></div>
+      </div>
+      <div id="authSignup" style="display:none">
+        <div class="auth-field"><label>Full name <span class="req">*</span></label><input id="suName" autocomplete="name"/></div>
+        <div class="auth-field"><label>Email <span class="req">*</span></label><input id="suEmail" type="email" autocomplete="email"/></div>
+        <div class="auth-field"><label>Password <span class="req">*</span> <span style="color:#789;font-weight:400">(6+ characters)</span></label><div class="pw-wrap"><input id="suPass" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass">&#128065;</button></div></div>
+        <div class="auth-field"><label>Confirm password <span class="req">*</span></label><div class="pw-wrap"><input id="suPass2" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass2">&#128065;</button></div></div>
+        <button id="signupBtn" class="btn-primary" type="button">Create account</button>
+        <div id="signupMsg" style="margin-top:10px;font-size:13px"></div>
+      </div>
+      <div class="auth-help">Need access? Choose <b>Create account</b> and the Regional Manager will approve it.</div>
+    </div>
+  </section>
 </div>
 
 <div id="appScreen" class="hidden">
@@ -1714,16 +1772,27 @@ function showAuthTab(which){
   const isLogin = which === 'login';
   const li = document.getElementById('authLogin');
   const su = document.getElementById('authSignup');
-  if (li) { li.style.display = isLogin ? 'block' : 'none'; li.classList.toggle('hidden', !isLogin); }
-  if (su) { su.style.display = isLogin ? 'none' : 'block'; su.classList.toggle('hidden', isLogin); }
+  if (li) li.style.display = isLogin ? 'block' : 'none';
+  if (su) su.style.display = isLogin ? 'none' : 'block';
   const lb = document.getElementById('tabLoginBtn');
   const sb = document.getElementById('tabSignupBtn');
   if (lb) lb.classList.toggle('active', isLogin);
   if (sb) sb.classList.toggle('active', !isLogin);
+  const title = document.getElementById('authTitle');
+  const subt  = document.getElementById('authSubtitle');
+  if (title) title.textContent = isLogin ? 'Sign in' : 'Create account';
+  if (subt)  subt.textContent  = isLogin ? 'Use the email and password you registered with.' : 'Fill in your details. An administrator will approve your account.';
 }
-window.showAuthTab = showAuthTab; // expose for safety
+window.showAuthTab = showAuthTab;
 $('#tabLoginBtn').onclick = () => showAuthTab('login');
 $('#tabSignupBtn').onclick = () => showAuthTab('signup');
+// Password visibility toggles
+document.querySelectorAll('.pw-toggle').forEach(b => b.onclick = () => {
+  const id = b.getAttribute('data-pw-target');
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.type = el.type === 'password' ? 'text' : 'password';
+});
 
 async function doLogin(useLegacy){
   const u = $('#lu').value.trim(), p = $('#lp').value;

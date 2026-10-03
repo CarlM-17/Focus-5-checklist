@@ -140,18 +140,38 @@ function verifyPassword(password, stored) {
 
 app.post('/api/signup', async (req, res) => {
   try {
-    const { email, password, fullName, level } = req.body || {};
+    const { email, password, fullName, level, assignedStores } = req.body || {};
     if (!email || !password || !fullName || !level) return res.json({ ok:false, error:'Email, password, full name and position are required' });
     if (!['Regional Manager','Area Manager','Store Manager'].includes(level)) return res.json({ ok:false, error:'Invalid position' });
+    if (level === 'Area Manager' && (!Array.isArray(assignedStores) || !assignedStores.length)) return res.json({ ok:false, error:'Area Managers must select at least one store' });
+    if (level === 'Store Manager' && (!Array.isArray(assignedStores) || assignedStores.length !== 1)) return res.json({ ok:false, error:'Store Managers must select exactly one store' });
     if (password.length < 6) return res.json({ ok:false, error:'Password must be at least 6 characters' });
     const emailLc = String(email).trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLc)) return res.json({ ok:false, error:'Invalid email format' });
-    const existing = await sheetsGet('UserAccounts!A2:I');
+    const existing = await sheetsGet('UserAccounts!A2:J');
     const dup = existing.some(r => (r[0]||'').trim().toLowerCase() === emailLc);
     if (dup) return res.json({ ok:false, error:'This email is already registered' });
-    const row = [[emailLc, hashPassword(password), String(fullName).trim(), level, '', 'Pending', new Date().toISOString(), '', '']];
-    await sheetsAppend('UserAccounts!A1:I1', row);
-    res.json({ ok:true, message:'Signup received. Waiting for Regional Manager approval.' });
+    // Bootstrap: if level is Regional Manager AND no approved RM exists yet, auto-approve this signup
+    const anyApprovedRM = existing.some(r => (r[5]||'').trim() === 'Approved' && (r[3]||'').trim().toLowerCase() === 'regional manager');
+    const autoApprove = (level === 'Regional Manager' && !anyApprovedRM);
+    const status = autoApprove ? 'Approved' : 'Pending';
+    const approvedBy = autoApprove ? 'bootstrap (first RM)' : '';
+    const approvedAt = autoApprove ? new Date().toISOString() : '';
+    const storesJson = (level === 'Regional Manager') ? '' : JSON.stringify(assignedStores || []);
+    const row = [[emailLc, hashPassword(password), String(fullName).trim(), level, '', status, new Date().toISOString(), approvedBy, approvedAt, storesJson]];
+    await sheetsAppend('UserAccounts!A1:J1', row);
+    const msg = autoApprove
+      ? 'Account created and auto-approved (first Regional Manager). You can now log in.'
+      : 'Signup received. Waiting for Regional Manager approval.';
+    res.json({ ok:true, message: msg, autoApproved: autoApprove });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/all-stores', async (req, res) => {
+  try {
+    const rows = await sheetsGet('ListOfStores!A2:G');
+    const stores = rows.map(r => ({ id: String(r[3]||'').trim(), name: String(r[4]||'').trim(), area: String(r[2]||'').trim(), region: String(r[1]||'').trim() })).filter(s => s.name);
+    res.json({ ok:true, stores });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -160,7 +180,7 @@ app.post('/api/login-email', async (req, res) => {
     const { email, password } = req.body || {};
     const emailLc = String(email || '').trim().toLowerCase();
     if (!emailLc || !password) return res.json({ ok:false, error:'Email and password required' });
-    const rows = await sheetsGet('UserAccounts!A2:I');
+    const rows = await sheetsGet('UserAccounts!A2:J');
     const user = rows.find(r => (r[0]||'').trim().toLowerCase() === emailLc);
     if (!user) return res.json({ ok:false, error:'Invalid email or password' });
     if (!verifyPassword(password, user[1])) return res.json({ ok:false, error:'Invalid email or password' });
@@ -170,12 +190,18 @@ app.post('/api/login-email', async (req, res) => {
     if (status !== 'Approved') return res.json({ ok:false, error:'Account not approved' });
     const level = (user[3] || '').trim();
     const linked = (user[4] || '').trim();
-    // Resolve storeName/area for Store Manager accounts via linked Store ID
+    let assignedStores = [];
+    try { assignedStores = JSON.parse(user[9] || '[]'); } catch (_) { assignedStores = []; }
+    // Resolve storeName/area for Store Manager — prefer assignedStores[0], fall back to linked
     let storeId = null, storeName = null, area = null;
-    if (level.toLowerCase() === 'store manager' && linked) {
-      const stores = await sheetsGet('ListOfStores!A2:G');
-      const storeRow = stores.find(r => String(r[3] || '').trim() === linked);
-      if (storeRow) { storeId = linked; storeName = (storeRow[4] || '').trim(); area = (storeRow[2] || '').trim(); }
+    if (level.toLowerCase() === 'store manager') {
+      const picked = assignedStores[0] || linked;
+      if (picked) {
+        const stores = await sheetsGet('ListOfStores!A2:G');
+        // Match by store name OR store ID
+        const storeRow = stores.find(r => String(r[4]||'').trim() === picked) || stores.find(r => String(r[3]||'').trim() === picked);
+        if (storeRow) { storeId = String(storeRow[3]||'').trim(); storeName = (storeRow[4] || '').trim(); area = (storeRow[2] || '').trim(); }
+      }
     }
     res.json({
       ok: true,
@@ -183,7 +209,8 @@ app.post('/api/login-email', async (req, res) => {
       level,
       storeId, storeName, area,
       email: emailLc,
-      fullName: user[2] || ''
+      fullName: user[2] || '',
+      assignedStores
     });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
@@ -191,7 +218,7 @@ app.post('/api/login-email', async (req, res) => {
 // Check if a requester is a Regional Manager — accepts either an approved email account OR a legacy AreaManagers row
 async function isRegionalManager(email, username) {
   if (email) {
-    const rows = await sheetsGet('UserAccounts!A2:I');
+    const rows = await sheetsGet('UserAccounts!A2:J');
     const u = rows.find(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
     if (u && (u[5]||'').trim() === 'Approved' && (u[3]||'').trim().toLowerCase() === 'regional manager') return true;
   }
@@ -210,18 +237,18 @@ app.get('/api/user-accounts', async (req, res) => {
     if (!(await isRegionalManager(email, username))) {
       return res.json({ ok:false, error:'Only Regional Managers can view accounts' });
     }
-    const rows = await sheetsGet('UserAccounts!A2:I');
-    const accounts = rows.map((r,i) => ({
-      row: i + 2,
-      email: r[0], fullName: r[2], level: r[3], linkedUsername: r[4],
-      status: r[5] || 'Pending', submittedAt: r[6], approvedBy: r[7], approvedAt: r[8]
-    }));
-    // Also return available usernames to link to
-    const amRows = await sheetsGet('AreaManagers!A2:C');
-    const smRows = await sheetsGet('StoreManagers!A2:C');
-    const amUsernames = amRows.map(r => ({ username: r[0], level: r[2] || 'Area Manager' })).filter(x => x.username);
-    const smUsernames = smRows.map(r => ({ username: r[0], level: 'Store Manager', displayName: r[1] })).filter(x => x.username);
-    res.json({ ok:true, accounts, amUsernames, smUsernames });
+    const rows = await sheetsGet('UserAccounts!A2:J');
+    const accounts = rows.map((r,i) => {
+      let assignedStores = [];
+      try { assignedStores = JSON.parse(r[9] || '[]'); } catch (_) {}
+      return {
+        row: i + 2,
+        email: r[0], fullName: r[2], level: r[3], linkedUsername: r[4],
+        status: r[5] || 'Pending', submittedAt: r[6], approvedBy: r[7], approvedAt: r[8],
+        assignedStores
+      };
+    });
+    res.json({ ok:true, accounts });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -231,7 +258,7 @@ async function requireRegional(req) {
   if (!(await isRegionalManager(email, username))) {
     return { ok:false, error:'Only Regional Managers can perform this action' };
   }
-  const rows = await sheetsGet('UserAccounts!A2:I');
+  const rows = await sheetsGet('UserAccounts!A2:J');
   return { ok:true, rows, requester: email || username };
 }
 
@@ -239,20 +266,17 @@ app.post('/api/approve-account', async (req, res) => {
   try {
     const check = await requireRegional(req);
     if (!check.ok) return res.json(check);
-    const { email, level, linkedUsername } = req.body || {};
-    if (!email || !level) return res.json({ ok:false, error:'email and level required' });
+    const { email } = req.body || {};
+    if (!email) return res.json({ ok:false, error:'email required' });
     const rows = check.rows;
     const idx = rows.findIndex(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
     if (idx === -1) return res.json({ ok:false, error:'Account not found' });
     const rowNum = idx + 2;
-    const data = [
-      { range: 'UserAccounts!D' + rowNum, values: [[level]] },
-      { range: 'UserAccounts!E' + rowNum, values: [[linkedUsername || '']] },
+    await sheetsBatchUpdateValues([
       { range: 'UserAccounts!F' + rowNum, values: [['Approved']] },
       { range: 'UserAccounts!H' + rowNum, values: [[check.requester]] },
       { range: 'UserAccounts!I' + rowNum, values: [[new Date().toISOString()]] }
-    ];
-    await sheetsBatchUpdateValues(data);
+    ]);
     res.json({ ok:true });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
@@ -1582,13 +1606,14 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
         <div class="auth-field"><label>Email <span class="req">*</span></label><input id="lu" type="email" autocomplete="username"/></div>
         <div class="auth-field"><label>Password <span class="req">*</span></label><div class="pw-wrap"><input id="lp" type="password" autocomplete="current-password"/><button type="button" class="pw-toggle" data-pw-target="lp">&#128065;</button></div></div>
         <button id="loginBtn" class="btn-primary" type="button">Sign in</button>
-        <button id="loginLegacyBtn" class="btn-ghost" type="button">Legacy Login (temporary)</button>
         <div id="loginErr" class="err" style="margin-top:10px"></div>
       </div>
       <div id="authSignup" style="display:none">
         <div class="auth-field"><label>Full name <span class="req">*</span></label><input id="suName" autocomplete="name"/></div>
         <div class="auth-field"><label>Email <span class="req">*</span></label><input id="suEmail" type="email" autocomplete="email"/></div>
         <div class="auth-field"><label>Position <span class="req">*</span></label><select id="suLevel"><option value="">-- select your position --</option><option value="Regional Manager">Regional Manager</option><option value="Area Manager">Area Manager</option><option value="Store Manager">Store Manager</option></select></div>
+        <div id="suStoreSingle" class="auth-field" style="display:none"><label>Your Store <span class="req">*</span></label><select id="suStoreOne"><option value="">-- select your store --</option></select></div>
+        <div id="suStoreMulti" class="auth-field" style="display:none"><label>Your Stores <span class="req">*</span> <span style="color:#789;font-weight:400;font-size:11px">(tick all stores you manage)</span></label><div id="suStoresBox" style="max-height:200px;overflow-y:auto;border:1px solid #d3dcd5;border-radius:8px;padding:8px 10px;background:#fafbfa"></div></div>
         <div class="auth-field"><label>Password <span class="req">*</span> <span style="color:#789;font-weight:400">(6+ characters)</span></label><div class="pw-wrap"><input id="suPass" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass">&#128065;</button></div></div>
         <div class="auth-field"><label>Confirm password <span class="req">*</span></label><div class="pw-wrap"><input id="suPass2" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass2">&#128065;</button></div></div>
         <button id="signupBtn" class="btn-primary" type="button">Create account</button>
@@ -1828,7 +1853,27 @@ async function doLogin(useLegacy){
   await enterApp();
 }
 $('#loginBtn').onclick = () => doLogin(false);
-$('#loginLegacyBtn').onclick = () => doLogin(true);
+const legBtn = $('#loginLegacyBtn'); if (legBtn) legBtn.onclick = () => doLogin(true);
+
+// Load store list for signup form, populate single + multi selectors
+let SIGNUP_STORES = [];
+(async () => {
+  const r = await api('/api/all-stores');
+  if (!r.ok) return;
+  SIGNUP_STORES = r.stores || [];
+  const sel = $('#suStoreOne');
+  if (sel) sel.innerHTML = '<option value="">-- select your store --</option>' + SIGNUP_STORES.map(s => '<option value="'+escapeHtml(s.name)+'">'+escapeHtml(s.name)+' ('+escapeHtml(s.area||'')+')</option>').join('');
+  const box = $('#suStoresBox');
+  if (box) box.innerHTML = SIGNUP_STORES.map(s => '<label style="display:block;padding:4px 2px;font-size:13px;cursor:pointer"><input type="checkbox" class="sm-store-chk" value="'+escapeHtml(s.name)+'" style="margin-right:6px"/>'+escapeHtml(s.name)+' <span style="color:#789;font-size:11px">('+escapeHtml(s.area||'')+')</span></label>').join('');
+})();
+
+// Toggle store section visibility by Position
+const suLvl = $('#suLevel');
+if (suLvl) suLvl.onchange = () => {
+  const v = suLvl.value;
+  $('#suStoreSingle').style.display = (v === 'Store Manager') ? 'block' : 'none';
+  $('#suStoreMulti').style.display  = (v === 'Area Manager')  ? 'block' : 'none';
+};
 $('#signupBtn').onclick = async () => {
   const name = $('#suName').value.trim(), email = $('#suEmail').value.trim(), level = $('#suLevel').value, p1 = $('#suPass').value, p2 = $('#suPass2').value;
   const msg = $('#signupMsg');
@@ -1836,11 +1881,25 @@ $('#signupBtn').onclick = async () => {
   if (!name || !email || !level || !p1) { msg.textContent = 'All fields required (including Position)'; return; }
   if (p1 !== p2) { msg.textContent = 'Passwords do not match'; return; }
   if (p1.length < 6) { msg.textContent = 'Password must be at least 6 characters'; return; }
-  const r = await api('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:p1, fullName:name, level })});
+  let assignedStores = [];
+  if (level === 'Store Manager') {
+    const v = ($('#suStoreOne') && $('#suStoreOne').value) || '';
+    if (!v) { msg.textContent = 'Store Managers must select their store'; return; }
+    assignedStores = [v];
+  } else if (level === 'Area Manager') {
+    assignedStores = [...document.querySelectorAll('.sm-store-chk:checked')].map(c => c.value);
+    if (!assignedStores.length) { msg.textContent = 'Area Managers must select at least one store'; return; }
+  }
+  const r = await api('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:p1, fullName:name, level, assignedStores })});
   if (!r.ok) { msg.textContent = r.error || 'Signup failed'; return; }
   msg.style.color = '#1f7a3a';
-  msg.textContent = 'Account created. Waiting for Regional Manager approval. You will be able to log in once approved.';
+  msg.textContent = r.autoApproved
+    ? 'Account created AND auto-approved as the first Regional Manager. You can log in now.'
+    : 'Account created. Waiting for Regional Manager approval. You will be able to log in once approved.';
   $('#suName').value = ''; $('#suEmail').value = ''; $('#suLevel').value = ''; $('#suPass').value = ''; $('#suPass2').value = '';
+  if ($('#suStoreOne')) $('#suStoreOne').value = '';
+  document.querySelectorAll('.sm-store-chk').forEach(c => c.checked = false);
+  $('#suStoreSingle').style.display = 'none'; $('#suStoreMulti').style.display = 'none';
 };
 
 $('#logoutBtn').onclick = () => { ['ff5_mgr','ff5_lvl','ff5_sid','ff5_sname','ff5_email'].forEach(k=>localStorage.removeItem(k)); location.reload(); };
@@ -4679,26 +4738,16 @@ async function loadUserApprovalsTab(){
   const pending  = r.accounts.filter(a => a.status === 'Pending');
   const approved = r.accounts.filter(a => a.status === 'Approved');
   const rejected = r.accounts.filter(a => a.status === 'Rejected');
-  const amOpts = r.amUsernames.map(x => '<option value="'+escapeHtml(x.username)+'">'+escapeHtml(x.username)+' ('+escapeHtml(x.level)+')</option>').join('');
-  const smOpts = r.smUsernames.map(x => '<option value="'+escapeHtml(x.username)+'">'+escapeHtml(x.username)+' - '+escapeHtml(x.displayName||'')+'</option>').join('');
+  const storesText = (a) => {
+    if (a.level === 'Regional Manager') return '<span class="muted">(all areas)</span>';
+    if (!a.assignedStores || !a.assignedStores.length) return '<span style="color:#c33">(none)</span>';
+    return a.assignedStores.map(s => '<span style="display:inline-block;background:#eef7ec;color:#1f7a3a;padding:2px 7px;border-radius:10px;font-size:11px;margin:1px">'+escapeHtml(s)+'</span>').join(' ');
+  };
 
   const pendRows = pending.map(a => \`<tr>
     <td style="padding:6px 8px;border:1px solid #eee"><b>\${escapeHtml(a.fullName||'')}</b><div style="font-size:11px;color:#789">\${escapeHtml(a.email||'')}</div></td>
-    <td style="padding:6px;border:1px solid #eee">
-      <select class="ua-level" data-email="\${escapeHtml(a.email)}" style="width:100%">
-        <option value="">-- select --</option>
-        <option value="Regional Manager">Regional Manager</option>
-        <option value="Area Manager">Area Manager</option>
-        <option value="Store Manager">Store Manager</option>
-      </select>
-    </td>
-    <td style="padding:6px;border:1px solid #eee">
-      <select class="ua-link" data-email="\${escapeHtml(a.email)}" style="width:100%">
-        <option value="">(no link - new user)</option>
-        <optgroup label="Area/Regional Managers">\${amOpts}</optgroup>
-        <optgroup label="Store Managers (Store ID)">\${smOpts}</optgroup>
-      </select>
-    </td>
+    <td style="padding:6px 8px;border:1px solid #eee;font-weight:600">\${escapeHtml(a.level||'')}</td>
+    <td style="padding:6px;border:1px solid #eee">\${storesText(a)}</td>
     <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.submittedAt?new Date(a.submittedAt).toLocaleString():''}</td>
     <td style="padding:6px;border:1px solid #eee;white-space:nowrap">
       <button class="ua-approve" data-email="\${escapeHtml(a.email)}" style="background:#1f7a3a;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Approve</button>
@@ -4709,7 +4758,7 @@ async function loadUserApprovalsTab(){
   const apprRows = approved.map(a => \`<tr>
     <td style="padding:6px 8px;border:1px solid #eee"><b>\${escapeHtml(a.fullName||'')}</b><div style="font-size:11px;color:#789">\${escapeHtml(a.email||'')}</div></td>
     <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(a.level||'')}</td>
-    <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(a.linkedUsername||'(no link)')}</td>
+    <td style="padding:6px 8px;border:1px solid #eee">\${storesText(a)}</td>
     <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.approvedAt?new Date(a.approvedAt).toLocaleString():''}<br>by \${escapeHtml(a.approvedBy||'')}</td>
     <td style="padding:6px;border:1px solid #eee"><button class="ua-reset" data-email="\${escapeHtml(a.email)}" style="background:#345;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Reset Password</button></td>
   </tr>\`).join('');
@@ -4727,12 +4776,12 @@ async function loadUserApprovalsTab(){
 
     <div class="card">
       <h3 style="margin:0 0 8px;color:#c33">Pending (\${pending.length})</h3>
-      \${pending.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Level</th><th style="padding:6px 8px;text-align:left">Link to existing username</th><th style="padding:6px 8px;text-align:left">Signed up</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+pendRows+'</tbody></table></div>' : '<div class="muted">No pending accounts.</div>'}
+      \${pending.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Position</th><th style="padding:6px 8px;text-align:left">Assigned Stores</th><th style="padding:6px 8px;text-align:left">Signed up</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+pendRows+'</tbody></table></div>' : '<div class="muted">No pending accounts.</div>'}
     </div>
 
     <div class="card">
       <h3 style="margin:0 0 8px;color:#1f7a3a">Approved (\${approved.length})</h3>
-      \${approved.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Level</th><th style="padding:6px 8px;text-align:left">Linked Username</th><th style="padding:6px 8px;text-align:left">Approved</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+apprRows+'</tbody></table></div>' : '<div class="muted">No approved accounts yet.</div>'}
+      \${approved.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">User</th><th style="padding:6px 8px;text-align:left">Position</th><th style="padding:6px 8px;text-align:left">Assigned Stores</th><th style="padding:6px 8px;text-align:left">Approved</th><th style="padding:6px;text-align:left">Action</th></tr></thead><tbody>'+apprRows+'</tbody></table></div>' : '<div class="muted">No approved accounts yet.</div>'}
     </div>
 
     <div class="card">
@@ -4743,10 +4792,7 @@ async function loadUserApprovalsTab(){
 
   document.querySelectorAll('.ua-approve').forEach(b => b.onclick = async () => {
     const email = b.dataset.email;
-    const level = document.querySelector('.ua-level[data-email="'+email+'"]').value;
-    const link  = document.querySelector('.ua-link[data-email="'+email+'"]').value;
-    if (!level) { alert('Pick a level first'); return; }
-    const r = await api('/api/approve-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email, level, linkedUsername:link })});
+    const r = await api('/api/approve-account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email })});
     if (!r.ok) { alert(r.error||'Failed'); return; }
     loadUserApprovalsTab();
   });

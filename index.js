@@ -3518,7 +3518,8 @@ const skuGroupOf = (raw) => {
   if (u === 'PORK' || u === 'BEEF') return 'MEAT';
   return u;
 };
-let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true }, histFrom:null, histTo:null, viewDate:null, history:[] };
+let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true }, histFrom:null, histTo:null, viewDate:null, history:[], currentSlot:null };
+function autoSKUSlot(){ const h = new Date().getHours(); return h < 10 ? 'AM' : 'PM'; }
 
 async function loadSKUChecklist(){
   $('#skuChkOut').innerHTML = '<div class="card muted">Loading SKUs...</div>';
@@ -3526,9 +3527,10 @@ async function loadSKUChecklist(){
   if (!SKU_STATE.histFrom) SKU_STATE.histFrom = todayStr(-29);
   if (!SKU_STATE.histTo) SKU_STATE.histTo = today;
   if (!SKU_STATE.viewDate) SKU_STATE.viewDate = today;
+  if (!SKU_STATE.currentSlot) SKU_STATE.currentSlot = autoSKUSlot();
   const [skuRes, latestRes, histRes] = await Promise.all([
     api('/api/sku-list?store=' + encodeURIComponent(S.storeName||'')),
-    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate),
+    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate + '&slot=' + SKU_STATE.currentSlot),
     api('/api/sku-history?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
   ]);
   // Backend now returns per-slot entries. Convert to legacy "days" shape (one row per date, aggregating AM+PM) for existing render code.
@@ -3617,8 +3619,17 @@ function renderSKUChecklist(latestRes){
   const pct = totalItems ? Math.round((totalSet/totalItems)*100) : 0;
 
   const isToday = (SKU_STATE.viewDate === today);
-  // Lock: once today's checklist is submitted, treat today the same as a historical view (read-only)
+  // Per-slot lock: only the CURRENT slot is considered locked (not both)
   const todayLocked = isToday && hasExisting;
+  // Status per slot (AM / PM) for today — read from history
+  const todaySlotRows = (SKU_STATE.histSlots || []).filter(e => e.date === today);
+  const slotInfo = (sl) => todaySlotRows.find(e => e.slot === sl);
+  const slotBadge = (sl) => {
+    const info = slotInfo(sl);
+    if (!info) return \`<span style="background:#999;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">\${sl}: not yet</span>\`;
+    const bg = info.onTime ? '#1f7a3a' : '#c33';
+    return \`<span style="background:\${bg};color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">\${sl}: \${info.onTime?'ON TIME':'LATE'}</span>\`;
+  };
   // ---- KPI summary at the very top ----
   const todayRow = (SKU_STATE.history || []).find(d => d.date === today);
   const statusBadge = !todayRow ? '<span style="background:#c33;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">NOT YET SUBMITTED</span>'
@@ -3629,12 +3640,23 @@ function renderSKUChecklist(latestRes){
     <div style="font-size:26px;font-weight:800;margin-top:6px;line-height:1">\${num}</div>
     <div style="font-size:12px;opacity:.95;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px">\${lbl}</div>
   </div>\`;
+  const slotBtn = (sl) => {
+    const on = SKU_STATE.currentSlot === sl;
+    const info = slotInfo(sl);
+    const lockMark = info ? ' &#128274;' : '';
+    return \`<button type="button" onclick="setSKUSlot('\${sl}')" style="background:\${on?'#1f7a3a':'#eef'};color:\${on?'#fff':'#223'};border:0;padding:8px 18px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px">\${sl} slot\${lockMark}</button>\`;
+  };
   const kpiRow = \`<div class="card" style="padding:12px">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
       <h3 style="margin:0;color:#1f7a3a">Focus 5 SKU Checklist</h3>
       <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${S.storeName||'(no store)'}</span>
       <span style="background:#eef;color:#334;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">\${today}</span>
-      \${statusBadge}
+      \${slotBadge('AM')} \${slotBadge('PM')}
+    </div>
+    <div style="margin-bottom:10px;padding:8px;background:#f4faf6;border-radius:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:12px;color:#556;font-weight:600">Rate:</span>
+      \${slotBtn('AM')} \${slotBtn('PM')}
+      <span class="muted" style="font-size:11px;margin-left:auto">AM deadline 10:00 &middot; PM deadline 15:00 &middot; &#128274; = submitted</span>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       \${kpi('&#128202;', totalItems, 'Total SKUs', '#345')}
@@ -3712,7 +3734,7 @@ function renderSKUChecklist(latestRes){
   // ---- Checklist header (date label + view mode indicator) ----
   const checklistHeader = \`<div class="card" style="padding:12px 14px;background:\${todayLocked||!isToday?'#fff8e1':'#f4faf6'};border-left:4px solid \${todayLocked||!isToday?'#e0a020':'#1f7a3a'}">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <b style="color:\${todayLocked||!isToday?'#a06800':'#1f7a3a'}">\${isToday ? (todayLocked ? 'Today - '+today+' (submitted - read-only)' : 'Today - '+today+' (editable)') : 'Viewing '+SKU_STATE.viewDate+' (read-only history)'}</b>
+      <b style="color:\${todayLocked||!isToday?'#a06800':'#1f7a3a'}">\${isToday ? (todayLocked ? 'Today '+SKU_STATE.currentSlot+' - '+today+' (submitted - read-only)' : 'Today '+SKU_STATE.currentSlot+' slot - '+today+' (editable)') : 'Viewing '+SKU_STATE.viewDate+' '+SKU_STATE.currentSlot+' (read-only history)'}</b>
       \${!isToday?'<button class="sm ghost" onclick="viewSKUDate(\\''+today+'\\')">Switch to Today</button>':''}
       \${todayLocked ? '<span style="background:#1f7a3a;color:#fff;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">&#128274; LOCKED</span>' : ''}
     </div>
@@ -3726,8 +3748,8 @@ function renderSKUChecklist(latestRes){
   </div>\`;
 
   const submitCard = (isToday && !todayLocked) ? \`<div class="card">
-    <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">Submit SKU Checklist</button>
-    <div id="skuErr" class="err" style="margin-top:8px">Note: once submitted, you cannot edit this day's checklist.</div>
+    <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">Submit \${SKU_STATE.currentSlot} SKU Checklist</button>
+    <div id="skuErr" class="err" style="margin-top:8px">Note: once submitted, you cannot edit this \${SKU_STATE.currentSlot} slot.</div>
   </div>\` : '';
 
   $('#skuChkOut').innerHTML = kpiRow + trendCard + historyCard + checklistHeader + sectionsHtml + submitCard;
@@ -3746,6 +3768,14 @@ function renderSKUChecklist(latestRes){
 
 function viewSKUDate(date){
   SKU_STATE.viewDate = date;
+  loadSKUChecklist();
+}
+
+function setSKUSlot(slot){
+  if (slot !== 'AM' && slot !== 'PM') return;
+  SKU_STATE.currentSlot = slot;
+  // Clear in-progress inputs when switching slots (per-slot state is independent)
+  SKU_STATE.statuses = {}; SKU_STATE.remarks = {};
   loadSKUChecklist();
 }
 

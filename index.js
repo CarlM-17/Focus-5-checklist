@@ -759,6 +759,10 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     const isRegional = level === 'regional manager';
     const isStoreMgr = level === 'store manager';
 
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) { assignedList = []; }
+    const assignedSet = new Set(assignedList.map(s => String(s||'').trim().toLowerCase()).filter(Boolean));
+
     const stores = await sheetsGet('ListOfStores!A2:G');
     const storeMap = {};
     const managerAreas = new Set();
@@ -766,7 +770,8 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       const storeName = r[4], areaName = r[2] || '(no area)', mgr = r[6] || '';
       if (!storeName) return;
       storeMap[storeName] = { area: areaName };
-      if (mgr.trim().toLowerCase() === manager) managerAreas.add(areaName);
+      const isMine = mgr.trim().toLowerCase() === manager || assignedSet.has(String(storeName).trim().toLowerCase());
+      if (isMine) managerAreas.add(areaName);
     });
     const allowedAreas = isRegional
       ? [...new Set(stores.map((r) => r[2] || '(no area)').filter(Boolean))]
@@ -774,9 +779,11 @@ app.get('/api/store-checks-monitor', async (req, res) => {
     const allowedStores = stores
       .filter((r) => {
         const areaName = r[2] || '(no area)';
-        if (!isRegional && (r[6] || '').trim().toLowerCase() !== manager) return false;
+        const storeName = r[4];
+        const isMine = (r[6] || '').trim().toLowerCase() === manager || (storeName && assignedSet.has(String(storeName).trim().toLowerCase()));
+        if (!isRegional && !isMine) return false;
         if (areaFilter && areaName !== areaFilter) return false;
-        return !!r[4];
+        return !!storeName;
       })
       .map((r) => r[4]);
 
@@ -786,7 +793,12 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       if (from && (r[4] || '') < from) return false;
       if (to && (r[4] || '') > to) return false;
       const areaOfRow = (storeMap[r[3]] || {}).area || '(unknown)';
-      if (!isRegional && !isStoreMgr && !managerAreas.has(areaOfRow)) return false;
+      const rowStore = (r[3]||'').trim();
+      if (!isRegional && !isStoreMgr) {
+        const inAssigned = assignedSet.size ? assignedSet.has(rowStore.toLowerCase()) : false;
+        if (!managerAreas.has(areaOfRow) && !inAssigned) return false;
+        if (assignedSet.size && !inAssigned) return false;
+      }
       if (areaFilter && areaOfRow !== areaFilter) return false;
       if (storeFilter && r[3] !== storeFilter) return false;
       return true;
@@ -831,7 +843,14 @@ app.get('/api/store-checks-monitor', async (req, res) => {
         const storeName = r[4], storeId = String(r[3] || '').trim(), areaName = r[2] || '(no area)';
         if (!storeName || !storeId) return false;
         if (!smStoreIds.has(storeId)) return false;
-        if (!isRegional && !managerAreas.has(areaName)) return false;
+        if (!isRegional) {
+          const inAssigned = assignedSet.has(String(storeName).trim().toLowerCase());
+          if (assignedSet.size) {
+            if (!inAssigned) return false;
+          } else {
+            if (!managerAreas.has(areaName)) return false;
+          }
+        }
         if (areaFilter && areaName !== areaFilter) return false;
         if (storeFilter && storeName !== storeFilter) return false;
         return true;
@@ -2584,7 +2603,8 @@ async function loadMonitor(){
   $('#monOut').innerHTML = '<div class="card muted">Loading...</div>';
   const qs = 'manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') +
              '&from=' + encodeURIComponent($('#monFrom').value||'') + '&to=' + encodeURIComponent($('#monTo').value||'') +
-             '&area=' + encodeURIComponent($('#monArea').value||'') + '&store=' + encodeURIComponent($('#monStore').value||'');
+             '&area=' + encodeURIComponent($('#monArea').value||'') + '&store=' + encodeURIComponent($('#monStore').value||'') +
+             '&assigned=' + encodeURIComponent(JSON.stringify(S.assignedStores||[]));
   const r = await api('/api/store-checks-monitor?' + qs);
   if (!r.ok){ $('#monOut').innerHTML = '<div class="card err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
   MON = r;

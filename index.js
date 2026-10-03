@@ -1712,10 +1712,14 @@ function api(url, opts){ return fetch(url, opts).then(r=>r.json()) }
 // ---- Login (email first, legacy fallback) ----
 function showAuthTab(which){
   const isLogin = which === 'login';
-  $('#authLogin').classList.toggle('hidden', !isLogin);
-  $('#authSignup').classList.toggle('hidden', isLogin);
-  $('#tabLoginBtn').classList.toggle('active', isLogin);
-  $('#tabSignupBtn').classList.toggle('active', !isLogin);
+  const li = document.getElementById('authLogin');
+  const su = document.getElementById('authSignup');
+  if (li) { li.style.display = isLogin ? 'block' : 'none'; li.classList.toggle('hidden', !isLogin); }
+  if (su) { su.style.display = isLogin ? 'none' : 'block'; su.classList.toggle('hidden', isLogin); }
+  const lb = document.getElementById('tabLoginBtn');
+  const sb = document.getElementById('tabSignupBtn');
+  if (lb) lb.classList.toggle('active', isLogin);
+  if (sb) sb.classList.toggle('active', !isLogin);
 }
 window.showAuthTab = showAuthTab; // expose for safety
 $('#tabLoginBtn').onclick = () => showAuthTab('login');

@@ -170,6 +170,35 @@ app.post('/api/signup', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+app.get('/api/user-directory', async (req, res) => {
+  try {
+    const dir = {};
+    // Primary: approved UserAccounts
+    const uaRows = await sheetsGet('UserAccounts!A2:J');
+    uaRows.forEach(r => {
+      const email = (r[0]||'').trim().toLowerCase();
+      if (!email) return;
+      const fullName = (r[2]||'').trim();
+      const level = (r[3]||'').trim();
+      const linked = (r[4]||'').trim();
+      const status = (r[5]||'').trim();
+      if (status !== 'Approved') return;
+      dir[email] = { fullName: fullName || email, level };
+      if (linked) dir[linked.toLowerCase()] = { fullName: fullName || linked, level };
+    });
+    // Fallback: legacy AreaManagers + StoreManagers
+    try {
+      const am = await sheetsGet('AreaManagers!A2:C');
+      am.forEach(r => { const u = (r[0]||'').trim(); if (u && !dir[u.toLowerCase()]) dir[u.toLowerCase()] = { fullName: u, level: (r[2]||'Area Manager').trim() }; });
+    } catch (_) {}
+    try {
+      const sm = await sheetsGet('StoreManagers!A2:C');
+      sm.forEach(r => { const u = (r[0]||'').trim(); const n = (r[1]||'').trim(); if (u && !dir[u.toLowerCase()]) dir[u.toLowerCase()] = { fullName: n || u, level: 'Store Manager' }; });
+    } catch (_) {}
+    res.json({ ok:true, directory: dir });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.get('/api/has-rm', async (req, res) => {
   try {
     const rows = await sheetsGet('UserAccounts!A2:J');
@@ -1268,7 +1297,8 @@ app.get('/api/review-pending', async (req, res) => {
       const slot = ((r[5] || 'AM') + '').trim().toUpperCase();
       const k = store + '||' + slot;
       if (!skuBySlot[k] || skuBySlot[k].id !== r[1]) return;
-      aggSKU[k] = aggSKU[k] || { total:0, available:0, oos:0, timestamp:skuBySlot[k].timestamp, oosList:[] };
+      const submittedBy = (r[2] || '').trim();
+      aggSKU[k] = aggSKU[k] || { total:0, available:0, oos:0, timestamp:skuBySlot[k].timestamp, oosList:[], submittedBy };
       aggSKU[k].total++;
       const st = (r[10] || '').trim();
       if (st === 'Available') aggSKU[k].available++;
@@ -1320,6 +1350,7 @@ app.get('/api/review-pending', async (req, res) => {
           skuTotal:     sku ? sku.total     : 0,
           skuOnTime:    sku ? sku.onTime    : null,
           skuTimestamp: sku ? sku.timestamp : null,
+          skuSubmittedBy: sku ? sku.submittedBy : null,
           oosList:      sku ? sku.oosList   : [],
           reviewed: !!review,
           reviewTimestamp: review ? review.timestamp : null,
@@ -1378,9 +1409,12 @@ app.get('/api/review-monitor', async (req, res) => {
       const mstores = amStores[am] || [];
       let total = mstores.length * 2; // AM+PM per store
       let reviewed = 0, late = 0;
+      const breakdown = [];
       mstores.forEach(st => ['AM','PM'].forEach(slot => {
         const rev = reviewExists[am + '||' + st + '||' + slot];
+        const smSubmitted = skuExists[st + '||' + slot];
         if (rev) { reviewed++; if (!rev.onTime) late++; }
+        breakdown.push({ store: st, slot, reviewed: !!rev, onTime: rev ? rev.onTime : null, smSubmitted: !!smSubmitted });
       }));
       return {
         manager: am,
@@ -1389,7 +1423,8 @@ app.get('/api/review-monitor', async (req, res) => {
         reviewed,
         pending: total - reviewed,
         late,
-        rate: total ? Math.round((reviewed / total) * 100) : 0
+        rate: total ? Math.round((reviewed / total) * 100) : 0,
+        breakdown
       };
     });
 
@@ -1800,7 +1835,18 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(() => {}); }
 
 const S = { manager:null, level:null, storeId:null, storeName:null, particulars:[], ratings:{}, remarks:{}, editingId:null,
-            scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null };
+            scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null, userDir:{} };
+// Resolve an email/username identifier to the user's full display name
+function nameOf(identifier){
+  if (!identifier) return '';
+  const key = String(identifier).trim().toLowerCase();
+  const u = S.userDir && S.userDir[key];
+  return (u && u.fullName) ? u.fullName : identifier;
+}
+async function loadUserDirectory(){
+  const r = await api('/api/user-directory');
+  if (r && r.ok) S.userDir = r.directory || {};
+}
 
 // ---- Rollout configuration ----
 // Compliance tracking starts from this date+slot. Earlier slots are shown as '—' and NOT counted
@@ -1923,7 +1969,9 @@ async function enterApp(){
   $('#loginScreen').classList.add('hidden');
   $('#appScreen').classList.remove('hidden');
   $('#logoutBtn').classList.remove('hidden');
-  $('#whoName').textContent = S.manager + ' (' + S.level + ')';
+  await loadUserDirectory();
+  const myName = (S.fullName && S.fullName.trim()) || nameOf(S.manager) || S.manager;
+  $('#whoName').textContent = myName + ' (' + S.level + ')';
   $('#date').value = todayStr();
   applyRoleUI();
   await loadParticulars();
@@ -3335,7 +3383,7 @@ async function loadStockTab(){
     </div>
     \${weeklyProgressInAppHTML}
   </div>\` : '';
-  // RM-only: fetch AM review completion for today
+  // RM-only: full AM Review Dashboard replaces the simple alert
   let amReviewCard = '';
   if ((S.level||'').toLowerCase() === 'regional manager') {
     const rv = await api('/api/review-monitor?date=' + todayStr());
@@ -3345,18 +3393,57 @@ async function loadStockTab(){
       const totalDone     = amStats.reduce((n,a) => n + a.reviewed, 0);
       const totalLate     = amStats.reduce((n,a) => n + a.late, 0);
       const complianceRate = totalExpected ? Math.round((totalDone / totalExpected) * 100) : 0;
-      const pendingAMs = amStats.filter(a => a.pending > 0);
-      const chips = pendingAMs.map(a => \`<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:4px 10px;border-radius:20px;margin:3px 4px 3px 0;font-weight:600;font-size:12px">&#9888; \${escapeHtml(a.manager)} <span style="background:#c33;color:#fff;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;margin-left:4px">\${a.pending} pending</span></span>\`).join('');
-      amReviewCard = \`<div class="card" style="border-left:6px solid \${pendingAMs.length?'#c33':'#1f7a3a'};background:\${pendingAMs.length?'linear-gradient(135deg,#fff5f5 0%,#ffe8e8 100%)':'#f0faf3'}">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <div style="font-size:28px">\${pendingAMs.length ? '&#128680;' : '&#9989;'}</div>
-          <div style="flex:1">
-            <div style="color:\${pendingAMs.length?'#c33':'#1f7a3a'};font-weight:800;font-size:15px">AM REVIEW COMPLIANCE: \${complianceRate}%</div>
-            <div style="font-size:13px;color:#345;margin-top:3px"><b>\${totalDone}</b> of <b>\${totalExpected}</b> store-slot reviews done\${totalLate?' - <b style="color:#c33">'+totalLate+' late</b>':''}</div>
-          </div>
-          <div style="text-align:center;padding:8px 14px;background:\${pendingAMs.length?'#c33':'#1f7a3a'};color:#fff;border-radius:8px;font-weight:800;font-size:20px;min-width:60px">\${amStats.length - pendingAMs.length}/\${amStats.length}</div>
+      const nowHr = new Date().getHours();
+
+      const summaryBar = \`<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="font-size:28px">\${complianceRate===100 ? '&#9989;' : '&#128680;'}</div>
+        <div style="flex:1">
+          <div style="color:\${complianceRate===100?'#1f7a3a':'#c33'};font-weight:800;font-size:16px">AM REVIEW DASHBOARD - TODAY</div>
+          <div style="font-size:13px;color:#345;margin-top:3px">\${totalDone} of \${totalExpected} store/slot reviews done \${totalLate?' - <b style="color:#c33">'+totalLate+' were late</b>':''}</div>
         </div>
-        \${pendingAMs.length ? '<div style="padding-top:8px;border-top:1px dashed #f0b0b0;margin-top:8px"><div style="font-size:11px;color:#789;margin-bottom:4px">AMs with pending reviews:</div>'+chips+'</div>' : ''}
+        <div style="text-align:center;padding:10px 18px;background:\${complianceRate===100?'#1f7a3a':'#c33'};color:#fff;border-radius:8px;font-weight:800;font-size:22px;min-width:90px">\${complianceRate}%</div>
+      </div>\`;
+
+      const amRows = amStats.map(a => {
+        const displayName = nameOf(a.manager);
+        const amBreakdown = a.breakdown.filter(b => b.slot === 'AM');
+        const pmBreakdown = a.breakdown.filter(b => b.slot === 'PM');
+        const slotCellsForSlot = (brk, deadlineHr) => {
+          const pastDeadline = nowHr >= deadlineHr;
+          return brk.map(b => {
+            if (b.reviewed) {
+              const bg = b.onTime ? '#1f7a3a' : '#c33';
+              return '<span style="display:inline-block;background:'+bg+';color:#fff;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' ('+b.slot+') - '+(b.onTime?'on time':'LATE')+'">'+escapeHtml(b.store)+'</span>';
+            }
+            if (!b.smSubmitted) {
+              return '<span style="display:inline-block;background:#eef;color:#789;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' - SM has not submitted">'+escapeHtml(b.store)+' (SM&#9888;)</span>';
+            }
+            const bg = pastDeadline ? '#c33' : '#e0a020';
+            const lbl = pastDeadline ? ' LATE' : ' pending';
+            return '<span style="display:inline-block;background:'+bg+';color:#fff;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' - '+(pastDeadline?'past deadline, not reviewed':'awaiting review')+'">'+escapeHtml(b.store)+lbl+'</span>';
+          }).join('');
+        };
+        const rowBg = a.pending > 0 ? '#fff5f5' : '#f0faf3';
+        const borderCol = a.late > 0 ? '#c33' : (a.pending > 0 ? '#e0a020' : '#1f7a3a');
+        return \`<div style="border-left:4px solid \${borderCol};background:\${rowBg};padding:10px 12px;border-radius:6px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+            <b style="font-size:14px;color:#223;flex:1">\${escapeHtml(displayName)}\${displayName !== a.manager ? ' <span style="color:#789;font-weight:400;font-size:11px">('+escapeHtml(a.manager)+')</span>' : ''}</b>
+            <span style="background:#fff;color:#1f7a3a;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px;border:1px solid #cfd8d3">\${a.reviewed}/\${a.slotsTotal} done</span>
+            \${a.late ? '<span style="background:#c33;color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">'+a.late+' LATE</span>' : ''}
+            \${a.pending ? '<span style="background:#e0a020;color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">'+a.pending+' pending</span>' : '<span style="background:#1f7a3a;color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">ALL DONE</span>'}
+          </div>
+          <div style="font-size:11px;color:#789;margin-bottom:2px"><b>AM slot</b> (deadline 11:00):</div>
+          <div style="margin-bottom:4px">\${slotCellsForSlot(amBreakdown, 11) || '<span class="muted">no stores</span>'}</div>
+          <div style="font-size:11px;color:#789;margin-bottom:2px"><b>PM slot</b> (deadline 16:00):</div>
+          <div>\${slotCellsForSlot(pmBreakdown, 16) || '<span class="muted">no stores</span>'}</div>
+        </div>\`;
+      }).join('');
+
+      amReviewCard = \`<div class="card">
+        <h3 style="margin:0 0 6px;color:#1f7a3a">AM Review Dashboard</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:10px">Each Area Manager's progress today. Green chip = reviewed on time, red = late or missed, grey = Store Manager has not submitted yet. Click a chip to see details.</div>
+        \${summaryBar}
+        \${amRows || '<div class="muted">No Area Managers assigned yet.</div>'}
       </div>\`;
     }
   }
@@ -4255,12 +4342,13 @@ function reviewCardHTML(x, deadlinePassed){
       : '<span style="background:'+AMBER+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">PENDING</span>';
     borderColor = AMBER; bgTint = '#fffdf6';
   }
+  const smName = x.skuSubmittedBy ? nameOf(x.skuSubmittedBy) : (x.storeManagerName || '');
   const skuStat = x.skuSubmitted
     ? '<div style="font-size:12px;color:#456;margin-top:4px"><span style="color:'+DARK+';font-weight:700">'+x.skuAvailable+' Available</span> · <span style="color:'+OOS+';font-weight:700">'+x.skuOOS+' OOS</span> · <span style="color:#789">'+x.skuTotal+' total</span></div>'
-      + '<div style="font-size:11px;color:#789;margin-top:2px">SM submitted ' + new Date(x.skuTimestamp).toLocaleString() + (x.skuOnTime ? '' : ' <b style="color:'+OOS+'">LATE</b>') + '</div>'
+      + '<div style="font-size:11px;color:#789;margin-top:2px">SM submitted ' + new Date(x.skuTimestamp).toLocaleString() + (x.skuOnTime ? '' : ' <b style="color:'+OOS+'">LATE</b>') + (smName?' <b style="color:#334">by '+escapeHtml(smName)+'</b>':'') + '</div>'
     : '<div style="font-size:11px;color:#c33;margin-top:4px">Store Manager has not submitted SKU Checklist for this slot yet.</div>';
   const reviewInfo = x.reviewed
-    ? '<div style="font-size:11px;color:#789;margin-top:4px">Reviewed ' + new Date(x.reviewTimestamp).toLocaleString() + '</div>'
+    ? '<div style="font-size:11px;color:#789;margin-top:4px">Reviewed ' + new Date(x.reviewTimestamp).toLocaleString() + ' by <b style="color:#334">'+escapeHtml(nameOf(S.manager))+'</b></div>'
     : '';
   // Expand/collapse for OOS SKU confirmation
   let expandSection = '';

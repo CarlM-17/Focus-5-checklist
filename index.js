@@ -1211,6 +1211,133 @@ app.get('/api/sku-history', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+app.get('/api/sku-rm-monitor', async (req, res) => {
+  try {
+    const date = (req.query.date || todayLocalPHstr()).trim();
+    const todayStr = date;
+
+    // Authorized stores = ListOfStores where StoreID has a StoreManagers row
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const smRows = await sheetsGet('StoreManagers!A2:C');
+    const smIds = new Set(smRows.map(r => String(r[0]||'').trim()).filter(Boolean));
+    const authorizedStores = stores
+      .filter(r => smIds.has(String(r[3]||'').trim()))
+      .map(r => ({ id: String(r[3]||'').trim(), name: (r[4]||'').trim(), area: (r[2]||'').trim() }))
+      .filter(s => s.name);
+
+    const skuRows = await sheetsGet('SKUChecklistData!A2:M');
+
+    // Pick latest ReportID per (store, slot) for TODAY
+    const todayLatest = {};
+    skuRows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      if (r[4] !== todayStr) return;
+      const k = (r[3]||'').trim() + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!todayLatest[k] || r[1] > todayLatest[k].id) todayLatest[k] = { id: r[1], timestamp: r[0], submittedBy: r[2] };
+    });
+    // Aggregate stats per slot
+    const slotStats = {};
+    skuRows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      if (r[4] !== todayStr) return;
+      const k = (r[3]||'').trim() + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!todayLatest[k] || todayLatest[k].id !== r[1]) return;
+      const s = slotStats[k] = slotStats[k] || { available:0, oos:0, total:0 };
+      s.total++;
+      const st = (r[10]||'').trim();
+      if (st === 'Available') s.available++;
+      else if (st === 'OOS') s.oos++;
+    });
+    // Compute on-time + merge with latest
+    Object.keys(todayLatest).forEach(k => {
+      const o = todayLatest[k]; const slot = k.split('||')[1];
+      const sub = new Date(o.timestamp);
+      const phHour = (sub.getUTCHours() + 8) % 24;
+      const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const dl = slot === 'AM' ? 10 : 15;
+      o.onTime = (subDatePH < todayStr) || (subDatePH === todayStr && phHour < dl);
+      Object.assign(o, slotStats[k] || { available:0, oos:0, total:0 });
+    });
+
+    // Per-store summary row for the grid
+    const storeStats = authorizedStores.map(s => {
+      const am = todayLatest[s.name + '||AM'];
+      const pm = todayLatest[s.name + '||PM'];
+      return {
+        store: s.name, area: s.area,
+        am: am ? { submitted:true, onTime:am.onTime, oos:am.oos, total:am.total, submittedBy:am.submittedBy, timestamp:am.timestamp } : { submitted:false },
+        pm: pm ? { submitted:true, onTime:pm.onTime, oos:pm.oos, total:pm.total, submittedBy:pm.submittedBy, timestamp:pm.timestamp } : { submitted:false }
+      };
+    });
+
+    // KPIs
+    const totalStores = authorizedStores.length;
+    const expectedSlots = totalStores * 2;
+    const submittedSlots = Object.keys(todayLatest).length;
+    const onTimeSlots = Object.values(todayLatest).filter(o => o.onTime).length;
+    const lateSlots = submittedSlots - onTimeSlots;
+    const totalOOS = Object.values(todayLatest).reduce((n,o) => n + (o.oos||0), 0);
+    const totalAvailable = Object.values(todayLatest).reduce((n,o) => n + (o.available||0), 0);
+    const complianceRate = expectedSlots ? Math.round((submittedSlots / expectedSlots) * 100) : 0;
+    const onTimeRate = submittedSlots ? Math.round((onTimeSlots / submittedSlots) * 100) : 0;
+    const passRate = (totalAvailable + totalOOS) ? Math.round((totalAvailable / (totalAvailable+totalOOS)) * 100) : 0;
+
+    // Category breakdown (RICE/EGGS/POULTRY/MEAT/SUGAR)
+    const groupOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
+    const CATS = ['RICE','EGGS','POULTRY','MEAT','SUGAR'];
+    const categories = {}; CATS.forEach(c => categories[c] = { oos:0, available:0 });
+    skuRows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      if (r[4] !== todayStr) return;
+      const k = (r[3]||'').trim() + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!todayLatest[k] || todayLatest[k].id !== r[1]) return;
+      const g = groupOf(r[6]);
+      if (!categories[g]) return;
+      const st = (r[10]||'').trim();
+      if (st === 'OOS') categories[g].oos++;
+      else if (st === 'Available') categories[g].available++;
+    });
+
+    // 14-day trend of OOS + submission count
+    const trend = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const ds = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+      trend.push({ date: ds, oos: 0, submissions: 0 });
+    }
+    const trendIdx = {}; trend.forEach(t => trendIdx[t.date] = t);
+    const latestPerKey = {};
+    skuRows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4];
+      if (!trendIdx[d]) return;
+      const k = d + '||' + (r[3]||'') + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!latestPerKey[k] || r[1] > latestPerKey[k]) latestPerKey[k] = r[1];
+    });
+    const subPerDay = {};
+    skuRows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4];
+      if (!trendIdx[d]) return;
+      const k = d + '||' + (r[3]||'') + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (latestPerKey[k] !== r[1]) return;
+      if ((r[10]||'').trim() === 'OOS') trendIdx[d].oos++;
+      (subPerDay[d] = subPerDay[d] || new Set()).add(k);
+    });
+    trend.forEach(t => t.submissions = (subPerDay[t.date] || new Set()).size);
+
+    res.json({ ok:true, date: todayStr,
+      kpis: { totalStores, expectedSlots, submittedSlots, onTimeSlots, lateSlots, totalOOS, totalAvailable, complianceRate, onTimeRate, passRate },
+      storeStats, categories, trend
+    });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+function todayLocalPHstr(){
+  const nowPH = new Date(Date.now() + 8*3600*1000);
+  return nowPH.toISOString().slice(0,10);
+}
+
 app.get('/api/sku-history-detail', async (req, res) => {
   try {
     const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
@@ -2147,7 +2274,7 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabStock').classList.toggle('hidden', t!=='stock');
   $('#tabSkuChk').classList.toggle('hidden', t!=='skuchk');
   $('#tabUsers').classList.toggle('hidden', t!=='users');
-  if (t==='stock') { const lvl=(S.level||'').toLowerCase(); if (lvl==='area manager') loadReviewTab(); else loadStockTab(); }
+  if (t==='stock') { const lvl=(S.level||'').toLowerCase(); if (lvl==='area manager') loadReviewTab(); else if (lvl==='regional manager') loadStockTabRM(); else loadStockTab(); }
   if (t==='skuchk') loadSKUChecklist();
   if (t==='users') loadUserApprovalsTab();
   if (t==='hist') loadHistory();
@@ -4245,6 +4372,149 @@ async function submitStock(){
   if (!r.ok) { $('#stockErr').textContent = r.error || 'Failed'; return; }
   alert('Stock Status Report submitted');
   loadStockTab();
+}
+
+// ---- Focus 5 Stock Status - Regional Manager dashboard (sourced from SKUChecklistData) ----
+async function loadStockTabRM(){
+  const out = $('#stockOut');
+  out.innerHTML = '<div class="card muted">Loading...</div>';
+  const date = todayStr();
+  const [rmRes, reviewRes] = await Promise.all([
+    api('/api/sku-rm-monitor?date=' + date),
+    api('/api/review-monitor?date=' + date)
+  ]);
+  if (!rmRes.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(rmRes.error||'Failed to load')+'</div>'; return; }
+  const k = rmRes.kpis;
+  const DARK = '#1f7a3a', ACCENT = '#FFC107', OOS = '#c33', AMBER = '#e0a020';
+
+  // KPI tiles
+  const kpi = (icon, num, lbl, bg, sub) => \`<div style="flex:1 1 150px;min-width:0;background:\${bg};color:#fff;padding:14px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
+    <div style="font-size:22px;opacity:.95;line-height:1">\${icon}</div>
+    <div style="font-size:28px;font-weight:800;margin-top:6px;line-height:1">\${num}</div>
+    <div style="font-size:11px;opacity:.95;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px">\${lbl}</div>
+    \${sub?'<div style="font-size:10px;opacity:.85;margin-top:2px;font-weight:400">'+sub+'</div>':''}
+  </div>\`;
+  const complianceBg = k.complianceRate >= 90 ? DARK : k.complianceRate >= 60 ? AMBER : OOS;
+  const passBg       = k.passRate       >= 90 ? DARK : k.passRate       >= 70 ? AMBER : OOS;
+  const onTimeBg     = k.onTimeRate     >= 90 ? DARK : k.onTimeRate     >= 70 ? AMBER : OOS;
+  const kpiRow = \`<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+    \${kpi('&#128202;', k.complianceRate + '%', 'Slot Compliance', complianceBg, k.submittedSlots+' of '+k.expectedSlots+' slots submitted')}
+    \${kpi('&#9203;',    k.onTimeRate     + '%', 'On-Time Rate',   onTimeBg,     k.onTimeSlots+' on time &middot; '+k.lateSlots+' late')}
+    \${kpi('&#127919;',  k.passRate       + '%', 'Pass Rate',       passBg,       k.totalAvailable+' available of '+(k.totalAvailable+k.totalOOS))}
+    \${kpi('&#10060;',   k.totalOOS,              'OOS SKUs Today', OOS,          'across '+k.submittedSlots+' submitted slots')}
+    \${kpi('&#127978;',  k.totalStores,           'Stores',          '#345',       k.expectedSlots+' total slot submissions expected')}
+  </div>\`;
+
+  // AM Review Dashboard
+  let amReviewCard = '';
+  if (reviewRes && reviewRes.ok) {
+    const amStats = reviewRes.amStats || [];
+    const totExp = amStats.reduce((n,a)=>n+a.slotsTotal,0);
+    const totDn  = amStats.reduce((n,a)=>n+a.reviewed,0);
+    const totLt  = amStats.reduce((n,a)=>n+a.late,0);
+    const cRate = totExp ? Math.round((totDn/totExp)*100) : 0;
+    const nowHr = new Date().getHours();
+    const amRows = amStats.map(a => {
+      const nm = nameOf(a.manager);
+      const chip = (b, dlHr) => {
+        const past = nowHr >= dlHr;
+        if (b.reviewed) { const bg = b.onTime ? DARK : OOS; return '<span style="display:inline-block;background:'+bg+';color:#fff;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' '+b.slot+' - '+(b.onTime?'on time':'LATE')+'">'+escapeHtml(b.store)+'</span>'; }
+        if (!b.smSubmitted) return '<span style="display:inline-block;background:#eef;color:#789;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' - SM not submitted">'+escapeHtml(b.store)+' (SM&#9888;)</span>';
+        const bg = past ? OOS : AMBER;
+        return '<span style="display:inline-block;background:'+bg+';color:#fff;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:700;margin:1px" title="'+escapeHtml(b.store)+' - '+(past?'past deadline, not reviewed':'awaiting review')+'">'+escapeHtml(b.store)+(past?' LATE':' pending')+'</span>';
+      };
+      const amB = a.breakdown.filter(b => b.slot==='AM'), pmB = a.breakdown.filter(b => b.slot==='PM');
+      const borderCol = a.late > 0 ? OOS : (a.pending > 0 ? AMBER : DARK);
+      const rowBg = a.pending > 0 ? '#fff5f5' : '#f0faf3';
+      return \`<div style="border-left:4px solid \${borderCol};background:\${rowBg};padding:10px 12px;border-radius:6px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <b style="font-size:14px;color:#223;flex:1">\${escapeHtml(nm)}\${nm!==a.manager?' <span style="color:#789;font-weight:400;font-size:11px">('+escapeHtml(a.manager)+')</span>':''}</b>
+          <span style="background:#fff;color:#1f7a3a;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px;border:1px solid #cfd8d3">\${a.reviewed}/\${a.slotsTotal} done</span>
+          \${a.late?'<span style="background:'+OOS+';color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">'+a.late+' LATE</span>':''}
+          \${a.pending?'<span style="background:'+AMBER+';color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">'+a.pending+' pending</span>':'<span style="background:'+DARK+';color:#fff;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">ALL DONE</span>'}
+        </div>
+        <div style="font-size:11px;color:#789;margin-bottom:2px"><b>AM slot</b> (deadline 11:00):</div>
+        <div style="margin-bottom:4px">\${amB.map(b=>chip(b,11)).join('')||'<span class="muted">none</span>'}</div>
+        <div style="font-size:11px;color:#789;margin-bottom:2px"><b>PM slot</b> (deadline 16:00):</div>
+        <div>\${pmB.map(b=>chip(b,16)).join('')||'<span class="muted">none</span>'}</div>
+      </div>\`;
+    }).join('');
+    amReviewCard = \`<div class="card">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+        <h3 style="margin:0;color:#1f7a3a">AM Review Dashboard</h3>
+        <span style="background:\${cRate===100?DARK:OOS};color:#fff;padding:4px 12px;border-radius:12px;font-weight:800;font-size:13px">\${cRate}% done</span>
+        <span class="muted" style="font-size:12px">\${totDn}/\${totExp} reviews &middot; \${totLt} late</span>
+      </div>
+      \${amRows || '<div class="muted">No Area Managers assigned yet.</div>'}
+    </div>\`;
+  }
+
+  // Category breakdown chart
+  const CATS = [{n:'RICE',i:'&#127834;'},{n:'EGGS',i:'&#129370;'},{n:'POULTRY',i:'&#128020;'},{n:'MEAT',i:'&#129385;'},{n:'SUGAR',i:'&#129474;'}];
+  const catBars = CATS.map(c => {
+    const b = (rmRes.categories && rmRes.categories[c.n]) || { oos:0, available:0 };
+    const total = b.oos + b.available;
+    if (!total) return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><div style="width:120px;font-size:13px;font-weight:600">'+c.i+' '+c.n+'</div><div style="flex:1;height:24px;background:#f2f2f2;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:11px">No data yet</div></div>';
+    const oPct = (b.oos/total)*100;
+    const aPct = (b.available/total)*100;
+    return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><div style="width:120px;font-size:13px;font-weight:600">'+c.i+' '+c.n+'</div><div style="flex:1;height:24px;background:#eee;border-radius:6px;overflow:hidden;display:flex">'
+      + (b.oos?'<div style="width:'+oPct+'%;background:'+OOS+';color:#fff;font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center">'+b.oos+' OOS</div>':'')
+      + (b.available?'<div style="width:'+aPct+'%;background:'+DARK+';color:#fff;font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center">'+b.available+' Available</div>':'')
+      + '</div><div style="width:60px;text-align:right;font-size:12px;color:#556">'+total+'</div></div>';
+  }).join('');
+  const catCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">SKU Status by Category - Today</h3>
+    <div style="font-size:11px;color:#789;margin-bottom:8px"><span style="display:inline-block;width:10px;height:10px;background:\${OOS};border-radius:2px;vertical-align:middle;margin-right:4px"></span>OOS <span style="display:inline-block;width:10px;height:10px;background:\${DARK};border-radius:2px;vertical-align:middle;margin-right:4px;margin-left:10px"></span>Available</div>
+    \${catBars}
+  </div>\`;
+
+  // 14-day OOS trend
+  const maxOOS = Math.max(1, ...rmRes.trend.map(t => t.oos));
+  const trendBars = rmRes.trend.map(t => {
+    const h = Math.round((t.oos / maxOOS) * 90) + 4;
+    const bg = t.oos === 0 ? DARK : t.oos < 20 ? AMBER : OOS;
+    return '<div style="flex:1;min-width:30px;max-width:60px;display:flex;flex-direction:column;align-items:center;gap:3px"><div style="font-size:10px;color:'+OOS+';font-weight:700">'+(t.oos||'')+'</div><div style="width:100%;background:#eee;border-radius:3px;height:100px;display:flex;align-items:flex-end"><div style="width:100%;height:'+h+'px;background:'+bg+'"></div></div><div style="font-size:9px;color:#789">'+t.date.slice(5)+'</div><div style="font-size:9px;color:#556">'+t.submissions+'s</div></div>';
+  }).join('');
+  const trendCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">Daily OOS Trend - Last 14 Days</h3>
+    <div style="font-size:11px;color:#789;margin-bottom:8px">Bar = OOS SKU count that day across all stores. Small number below = # slot submissions that day.</div>
+    <div style="display:flex;gap:4px;overflow-x:auto;padding:4px 0">\${trendBars}</div>
+  </div>\`;
+
+  // Per-store compliance grid
+  const storeRows = rmRes.storeStats.map(s => {
+    const slotCell = (slot, dlHr) => {
+      if (slot.submitted) {
+        const bg = slot.onTime ? DARK : OOS;
+        const nm = slot.submittedBy ? nameOf(slot.submittedBy) : '';
+        return '<td style="padding:4px 8px;text-align:center;background:'+bg+';color:#fff;font-weight:700;font-size:11px" title="OOS: '+slot.oos+' / Total: '+slot.total+(nm?' - by '+nm:'')+'">'+(slot.onTime?'OK':'LATE')+' <span style="font-size:10px;opacity:.9">('+slot.oos+' OOS)</span></td>';
+      }
+      const nowHr = new Date().getHours();
+      const past = nowHr >= dlHr;
+      const bg = past ? OOS : '#aaa';
+      return '<td style="padding:4px 8px;text-align:center;background:'+bg+';color:#fff;font-weight:700;font-size:11px">'+(past?'MISSED':'NOT YET')+'</td>';
+    };
+    return '<tr><td style="padding:4px 8px;font-weight:600;font-size:12px">'+escapeHtml(s.store)+'<div style="font-size:10px;color:#789">'+escapeHtml(s.area)+'</div></td>'+slotCell(s.am,10)+slotCell(s.pm,15)+'</tr>';
+  }).join('');
+  const gridCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">Per-Store Submission Grid - Today</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">Store</th><th style="padding:6px 8px;text-align:center">AM slot</th><th style="padding:6px 8px;text-align:center">PM slot</th></tr></thead>
+      <tbody>\${storeRows}</tbody>
+    </table></div>
+  </div>\`;
+
+  // Late submitters list
+  const latesAM = rmRes.storeStats.filter(s => s.am.submitted && !s.am.onTime).map(s => ({store:s.store, slot:'AM', by:s.am.submittedBy, ts:s.am.timestamp}));
+  const latesPM = rmRes.storeStats.filter(s => s.pm.submitted && !s.pm.onTime).map(s => ({store:s.store, slot:'PM', by:s.pm.submittedBy, ts:s.pm.timestamp}));
+  const lates = latesAM.concat(latesPM);
+  const latesHTML = lates.length ? lates.map(l => '<div style="padding:6px 8px;border-left:3px solid '+OOS+';background:#fff5f5;margin-bottom:4px;font-size:12px"><b>'+escapeHtml(l.store)+'</b> <span style="color:#789">('+l.slot+')</span> <span style="color:'+OOS+';font-weight:700">LATE</span> - by <b>'+escapeHtml(nameOf(l.by))+'</b> at '+new Date(l.ts).toLocaleString()+'</div>').join('') : '<div class="muted" style="padding:6px">No late submissions today</div>';
+  const latesCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:\${lates.length?OOS:DARK}">Late Submissions Today \${lates.length?'('+lates.length+')':''}</h3>
+    \${latesHTML}
+  </div>\`;
+
+  out.innerHTML = kpiRow + amReviewCard + catCard + trendCard + gridCard + latesCard;
 }
 
 // ---- Stock Review (Area Manager) ----

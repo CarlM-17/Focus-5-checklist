@@ -849,6 +849,80 @@ app.get('/api/stock-monitor', async (req, res) => {
   }
 });
 
+// ---------- Focus 5 SKU Checklist ----------
+const SKU_STATUSES = ['Available', 'OOS'];
+
+app.get('/api/sku-list', async (req, res) => {
+  try {
+    const store = (req.query.store || '').trim();
+    if (!store) return res.json({ ok:false, error:'store required' });
+    const rows = await sheetsGet('Focus5SummarySKU!A2:H');
+    const filtered = rows.filter(r => (r[1] || '').trim().toLowerCase() === store.toLowerCase());
+    const items = filtered.map(r => ({
+      storeCode: r[0], storeName: r[1], rank: parseInt(r[2]) || 0,
+      sku: r[3], description: r[4], supplier: r[5], skuType: r[6], category: (r[7]||'').trim()
+    }));
+    res.json({ ok:true, items });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+async function markSKUEdited(storeMgr, date, newId) {
+  const rows = await sheetsGet('SKUChecklistData!A2:L');
+  const data = [];
+  rows.forEach((r, i) => {
+    if ((r[11] || 'ACTIVE') !== 'ACTIVE') return;
+    if (newId && r[1] === newId) return;
+    if ((r[2] || '').trim().toLowerCase() === storeMgr.trim().toLowerCase() && r[4] === date) {
+      data.push({ range: `SKUChecklistData!L${i + 2}`, values: [['EDITED']] });
+    }
+  });
+  if (data.length) await sheetsBatchUpdateValues(data);
+}
+
+app.post('/api/sku-submit', async (req, res) => {
+  try {
+    const { storeMgr, store, date, entries } = req.body || {};
+    if (!storeMgr || !store || !date || !Array.isArray(entries) || !entries.length) {
+      return res.json({ ok:false, error:'Missing fields' });
+    }
+    for (const e of entries) {
+      if (!SKU_STATUSES.includes(e.status)) return res.json({ ok:false, error:'Invalid status for SKU ' + (e.sku||'') });
+    }
+    const twoDaysAgo = new Date(Date.now() - 2*86400*1000).toISOString().slice(0,10);
+    if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
+    const ts = new Date().toISOString();
+    const id = 'KS' + Date.now();
+    const rows = entries.map(e => [
+      ts, id, storeMgr, store, date,
+      e.category || '', String(e.rank || ''), e.sku || '', e.description || '',
+      e.status || '', e.remarks || '', 'ACTIVE'
+    ]);
+    await sheetsAppend('SKUChecklistData!A1:L1', rows);
+    try { await markSKUEdited(storeMgr, date, id); } catch(_) {}
+    res.json({ ok:true, reportId: id });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/sku-latest', async (req, res) => {
+  try {
+    const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const date = (req.query.date || '').trim();
+    if (!storeMgr || !date) return res.json({ ok:false, error:'storeMgr and date required' });
+    const rows = await sheetsGet('SKUChecklistData!A2:L');
+    const filtered = rows.filter(r =>
+      (r[11] || 'ACTIVE') === 'ACTIVE' &&
+      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      r[4] === date
+    );
+    if (!filtered.length) return res.json({ ok:true, entries: [] });
+    const latestId = filtered.reduce((max, r) => r[1] > max ? r[1] : max, '');
+    const latest = filtered.filter(r => r[1] === latestId);
+    res.json({ ok:true, reportId: latestId, timestamp: latest[0][0],
+      entries: latest.map(r => ({ category:r[5], rank:parseInt(r[6])||0, sku:r[7], description:r[8], status:r[9], remarks:r[10] }))
+    });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.get('/api/am-stores', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
@@ -956,6 +1030,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
     <button data-tab="mon">Store Checks</button>
     <button data-tab="stock">Focus 5 Stock Status</button>
     <button data-tab="scheck">Store Check</button>
+    <button data-tab="skuchk">Focus 5 SKU Checklist</button>
   </div>
 
   <div id="tabNew">
@@ -1031,6 +1106,10 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 
   <div id="tabStock" class="hidden">
     <div id="stockOut"><div class="card muted">Loading...</div></div>
+  </div>
+
+  <div id="tabSkuChk" class="hidden">
+    <div id="skuChkOut"><div class="card muted">Loading...</div></div>
   </div>
 
   <div id="tabSCheck" class="hidden">
@@ -1170,6 +1249,7 @@ function applyRoleUI(){
   show('.tabs button[data-tab="mon"]',  !isStoreMgr);
   show('.tabs button[data-tab="stock"]', !isStoreMgr);
   show('.tabs button[data-tab="scheck"]', isStoreMgr);
+  show('.tabs button[data-tab="skuchk"]', isStoreMgr);
 }
 
 // Slot windows: earliest .. deadline (local time hours, 24h)
@@ -1310,7 +1390,9 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabMon').classList.toggle('hidden', t!=='mon');
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
   $('#tabStock').classList.toggle('hidden', t!=='stock');
+  $('#tabSkuChk').classList.toggle('hidden', t!=='skuchk');
   if (t==='stock') loadStockTab();
+  if (t==='skuchk') loadSKUChecklist();
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
   if (t==='mon') { if(!$('#monFrom').value){ $('#monFrom').value = todayStr(-14); $('#monTo').value = todayStr(); } loadMonitor(); }
@@ -3342,6 +3424,178 @@ async function submitStock(){
   if (!r.ok) { $('#stockErr').textContent = r.error || 'Failed'; return; }
   alert('Stock Status Report submitted');
   loadStockTab();
+}
+
+// ---- Focus 5 SKU Checklist (Store Manager only) ----
+// Order matches existing Focus 5 Stock Status: Rice, Eggs, Poultry, Meat, Sugar
+const SKU_CAT_ORDER = ['RICE','EGGS','POULTRY','MEAT','SUGAR'];
+const SKU_CAT_ICONS = { RICE:'&#127834;', EGGS:'&#129370;', POULTRY:'&#128020;', MEAT:'&#129385;', SUGAR:'&#129474;' };
+let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true } };
+
+async function loadSKUChecklist(){
+  $('#skuChkOut').innerHTML = '<div class="card muted">Loading SKUs...</div>';
+  const today = todayStr();
+  const [skuRes, latestRes] = await Promise.all([
+    api('/api/sku-list?store=' + encodeURIComponent(S.storeName||'')),
+    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + today)
+  ]);
+  if (!skuRes.ok){ $('#skuChkOut').innerHTML = '<div class="card err">'+escapeHtml(skuRes.error||'Failed to load SKUs')+'</div>'; return; }
+  if (!skuRes.items || !skuRes.items.length){
+    $('#skuChkOut').innerHTML = '<div class="card"><div style="padding:12px;color:#c33;font-weight:bold">No SKUs found for store "'+escapeHtml(S.storeName||'')+'" in Focus5SummarySKU sheet. Contact admin.</div></div>';
+    return;
+  }
+  SKU_STATE.items = skuRes.items;
+  // Preload previously submitted statuses/remarks for today (if any)
+  const prev = {};
+  (latestRes.entries || []).forEach(e => { prev[e.sku + '||' + e.category] = { status: e.status, remarks: e.remarks || '' }; });
+  SKU_STATE.statuses = {}; SKU_STATE.remarks = {};
+  skuRes.items.forEach(it => {
+    const k = it.sku + '||' + (it.category||'').trim().toUpperCase();
+    if (prev[k]) { SKU_STATE.statuses[k] = prev[k].status; SKU_STATE.remarks[k] = prev[k].remarks; }
+  });
+  renderSKUChecklist(latestRes);
+}
+
+function renderSKUChecklist(latestRes){
+  const today = todayStr();
+  const hasExisting = latestRes && (latestRes.entries || []).length > 0;
+  // Group items by category (upper-cased for matching)
+  const byCat = {};
+  SKU_STATE.items.forEach(it => {
+    const c = (it.category || '').trim().toUpperCase();
+    (byCat[c] = byCat[c] || []).push(it);
+  });
+  // Sort each category by rank
+  Object.values(byCat).forEach(list => list.sort((a,b) => (a.rank||99) - (b.rank||99)));
+
+  // Build sections in requested order (Rice, Eggs, Poultry, Meat, Sugar)
+  const sectionsHtml = SKU_CAT_ORDER.map(cat => {
+    const items = byCat[cat] || [];
+    if (!items.length) return \`<div class="card">
+      <div style="font-weight:700;color:#1f7a3a">\${SKU_CAT_ICONS[cat]||''} \${toTitle(cat)}</div>
+      <div class="muted" style="margin-top:6px;font-size:12px">No SKUs listed for this category.</div>
+    </div>\`;
+    const avail = items.filter(it => SKU_STATE.statuses[it.sku+'||'+cat] === 'Available').length;
+    const oos   = items.filter(it => SKU_STATE.statuses[it.sku+'||'+cat] === 'OOS').length;
+    const unset = items.length - avail - oos;
+    const expanded = SKU_STATE.expanded[cat];
+    const rowsHtml = expanded ? items.map(it => skuRowHTML(it, cat)).join('') : '';
+    return \`<div class="card" style="padding:0;overflow:hidden">
+      <div style="padding:12px 14px;background:#eef7ec;border-left:4px solid #1f7a3a;cursor:pointer;display:flex;align-items:center;gap:10px" onclick="toggleSKUCat('\${cat}')">
+        <div style="font-size:22px">\${SKU_CAT_ICONS[cat]||''}</div>
+        <div style="flex:1">
+          <div style="font-weight:700;color:#1f7a3a;font-size:15px">\${toTitle(cat)} <span style="color:#789;font-weight:400;font-size:12px">(\${items.length} SKUs)</span></div>
+          <div style="font-size:11px;color:#456;margin-top:2px">
+            <span style="color:#1f7a3a;font-weight:600">\${avail} Available</span>
+            &nbsp;·&nbsp;
+            <span style="color:#c33;font-weight:600">\${oos} OOS</span>
+            &nbsp;·&nbsp;
+            <span style="color:#a60;font-weight:600">\${unset} not set</span>
+          </div>
+        </div>
+        <div style="color:#1f7a3a;font-size:16px">\${expanded?'&#9660;':'&#9654;'}</div>
+      </div>
+      \${expanded ? '<div style="padding:4px 14px 10px">'+rowsHtml+'</div>' : ''}
+    </div>\`;
+  }).join('');
+
+  const totalItems = SKU_STATE.items.length;
+  const totalSet = Object.values(SKU_STATE.statuses).filter(v => v==='Available' || v==='OOS').length;
+  const totalOOS = Object.values(SKU_STATE.statuses).filter(v => v==='OOS').length;
+  const totalAvail = Object.values(SKU_STATE.statuses).filter(v => v==='Available').length;
+  const pct = totalItems ? Math.round((totalSet/totalItems)*100) : 0;
+
+  const headerCard = \`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0;color:#1f7a3a">Focus 5 SKU Checklist</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${S.storeName||'(no store)'}</span>
+      <span style="background:#eef;color:#334;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">\${today}</span>
+      \${hasExisting?'<span style="background:#fff8e1;color:#a06800;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid #f0d78a">Already submitted - resubmit to update</span>':''}
+    </div>
+    <div style="margin-top:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
+      <b style="color:#a06800">DEADLINE:</b> Submit before <b>10:00 AM</b> daily. Tap <b>Available</b> or <b>OOS</b> for every top-ranked SKU in each category. Add remarks if needed.
+    </div>
+    <div style="margin-top:10px;padding:10px;background:#f4faf6;border-radius:6px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <div style="height:10px;background:#eee;border-radius:5px;overflow:hidden"><div style="height:100%;width:\${pct}%;background:#1f7a3a;transition:width .2s"></div></div>
+        </div>
+        <div style="font-weight:700;color:#1f7a3a;font-size:13px">\${totalSet} of \${totalItems} rated (\${pct}%)</div>
+        <div style="font-size:12px"><span style="color:#1f7a3a;font-weight:600">\${totalAvail} Available</span> &nbsp;·&nbsp; <span style="color:#c33;font-weight:600">\${totalOOS} OOS</span></div>
+      </div>
+    </div>
+  </div>\`;
+
+  const submitCard = \`<div class="card">
+    <button id="skuSubmitBtn" style="font-size:15px;padding:12px 24px">\${hasExisting?'Update SKU Checklist':'Submit SKU Checklist'}</button>
+    <div id="skuErr" class="err" style="margin-top:8px"></div>
+  </div>\`;
+
+  $('#skuChkOut').innerHTML = headerCard + sectionsHtml + submitCard;
+  $('#skuSubmitBtn').onclick = submitSKUChecklist;
+}
+
+function skuRowHTML(it, cat){
+  const k = it.sku + '||' + cat;
+  const st = SKU_STATE.statuses[k];
+  const rm = SKU_STATE.remarks[k] || '';
+  const btn = (val, bg) => {
+    const on = st === val;
+    return \`<button type="button" data-sku="\${escapeHtml(it.sku)}" data-cat="\${cat}" data-val="\${val}" onclick="setSKUStatus(this)" style="flex:1;background:\${on?bg:'#eef'};color:\${on?'#fff':'#334'};border:0;border-radius:6px;padding:8px 4px;font-weight:700;cursor:pointer;font-size:13px">\${val}</button>\`;
+  };
+  return \`<div style="padding:10px 0;border-bottom:1px dashed #eee">
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
+      <span style="background:#1f7a3a;color:#fff;font-weight:700;font-size:11px;padding:2px 7px;border-radius:4px;min-width:26px;text-align:center">#\${it.rank||'?'}</span>
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;color:#223;line-height:1.3">\${escapeHtml(it.description||it.sku)}</div>
+        <div style="font-size:11px;color:#789;margin-top:1px">\${escapeHtml(it.sku||'')} &middot; \${escapeHtml(it.supplier||'')} &middot; \${escapeHtml(it.skuType||'')}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:4px">\${btn('Available','#1f7a3a')}\${btn('OOS','#c33')}</div>
+    \${st==='OOS' ? \`<textarea data-sku-remarks="\${escapeHtml(it.sku)}" data-cat="\${cat}" oninput="setSKURemarks(this)" placeholder="Remarks for this OOS SKU (optional)" style="min-height:36px;font-size:12px;margin-top:4px">\${escapeHtml(rm)}</textarea>\` : ''}
+  </div>\`;
+}
+
+function toTitle(s){ return s.charAt(0) + s.slice(1).toLowerCase(); }
+
+function setSKUStatus(btn){
+  const sku = btn.dataset.sku, cat = btn.dataset.cat, val = btn.dataset.val;
+  SKU_STATE.statuses[sku + '||' + cat] = val;
+  renderSKUChecklist({ entries: [] });
+}
+function setSKURemarks(ta){
+  const sku = ta.dataset.skuRemarks, cat = ta.dataset.cat;
+  SKU_STATE.remarks[sku + '||' + cat] = ta.value;
+}
+function toggleSKUCat(cat){
+  SKU_STATE.expanded[cat] = !SKU_STATE.expanded[cat];
+  renderSKUChecklist({ entries: [] });
+}
+
+async function submitSKUChecklist(){
+  $('#skuErr').textContent = '';
+  const entries = SKU_STATE.items.map(it => {
+    const k = it.sku + '||' + (it.category||'').trim().toUpperCase();
+    return {
+      category: (it.category||'').trim().toUpperCase(),
+      rank: it.rank, sku: it.sku, description: it.description,
+      status: SKU_STATE.statuses[k] || '',
+      remarks: SKU_STATE.remarks[k] || ''
+    };
+  });
+  const missing = entries.filter(e => !e.status);
+  if (missing.length) {
+    $('#skuErr').textContent = 'Please rate all SKUs. Missing: ' + missing.length + ' SKU' + (missing.length===1?'':'s') + '. The first few: ' + missing.slice(0,3).map(e => e.sku + ' (' + e.category + ')').join(', ') + (missing.length>3?'...':'');
+    return;
+  }
+  const date = todayStr();
+  const btn = $('#skuSubmitBtn'); btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Submitting...';
+  const r = await api('/api/sku-submit', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ storeMgr: S.manager, store: S.storeName, date, entries }) });
+  btn.disabled = false; btn.textContent = orig;
+  if (!r.ok) { $('#skuErr').textContent = r.error || 'Failed'; return; }
+  alert('Focus 5 SKU Checklist submitted - ' + entries.length + ' SKUs recorded');
+  loadSKUChecklist();
 }
 
 // Auto-login if remembered

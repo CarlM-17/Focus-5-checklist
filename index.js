@@ -4,6 +4,8 @@
 const express = require('express');
 const https = require('https');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
@@ -1366,6 +1368,46 @@ app.get('/api/am-stores', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
 });
 
+// ---------- PWA assets ----------
+app.get('/Focus5_icon.png', (req, res) => {
+  const p = path.join(__dirname, 'Focus5_icon.png');
+  if (fs.existsSync(p)) res.sendFile(p);
+  else res.status(404).send('icon missing');
+});
+
+app.get('/manifest.json', (req, res) => {
+  res.json({
+    name: 'Fresh Focus 5 Checklist',
+    short_name: 'Focus 5',
+    description: 'Fresh Focus 5 Checklist - Stock, SKU and Compliance monitoring',
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'any',
+    background_color: '#0e3a1c',
+    theme_color: '#1f7a3a',
+    icons: [
+      { src: '/Focus5_icon.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/Focus5_icon.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/Focus5_icon.png', sizes: 'any',    type: 'image/png', purpose: 'maskable' }
+    ]
+  });
+});
+
+app.get('/sw.js', (req, res) => {
+  res.type('application/javascript').send(
+    "const CACHE='ff5-v1';\n" +
+    "self.addEventListener('install', e => { self.skipWaiting(); });\n" +
+    "self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });\n" +
+    "self.addEventListener('fetch', e => {\n" +
+    "  const u = e.request.url;\n" +
+    "  if (/\\.(png|jpg|svg|ico)$/.test(u) || u.endsWith('/manifest.json')) {\n" +
+    "    e.respondWith(caches.open(CACHE).then(c => c.match(e.request).then(r => r || fetch(e.request).then(resp => { c.put(e.request, resp.clone()); return resp; }))));\n" +
+    "  }\n" +
+    "});\n"
+  );
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---------- Frontend ----------
@@ -1377,25 +1419,43 @@ const HTML = `<!doctype html>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <title>Fresh Focus 5 - Checklist</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/Focus5_icon.png">
+<link rel="apple-touch-icon" href="/Focus5_icon.png">
+<meta name="apple-mobile-web-app-title" content="Focus 5">
+<meta name="application-name" content="Focus 5">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:rgba(0,0,0,0)}
 html,body{overscroll-behavior-y:contain}
 .noScroll::-webkit-scrollbar{display:none;width:0;height:0}
-body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f8;color:#222;padding-bottom:env(safe-area-inset-bottom)}
-header{background:#1f7a3a;color:#fff;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;gap:8px}
-header h1{margin:0;font-size:16px;line-height:1.2}
-header .who{font-size:12px;opacity:.95;text-align:right;display:flex;align-items:center;gap:6px;flex-shrink:0}
-main{padding:12px;max-width:820px;margin:0 auto}
-.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+:root{
+  --brand:#1f7a3a; --brand-dark:#155a2b; --brand-darker:#0e3a1c;
+  --accent:#FFC107; --accent-dark:#D4A017; --accent-soft:#FFF4CC;
+  --bg:#f3f6f3; --surface:#ffffff; --ink:#1a2621; --muted:#5e6b64;
+  --border:#dbe3dd;
+}
+body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink);padding-bottom:env(safe-area-inset-bottom)}
+header{background:linear-gradient(135deg,var(--brand-darker) 0%,var(--brand) 60%,var(--brand-dark) 100%);color:#fff;padding:14px 24px;padding-top:calc(14px + env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;gap:12px;border-bottom:3px solid var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.08)}
+header h1{margin:0;font-size:18px;line-height:1.2;font-weight:700;letter-spacing:.3px;display:flex;align-items:center;gap:10px}
+header h1::before{content:'';display:inline-block;width:28px;height:28px;background:url('/Focus5_icon.png') center/contain no-repeat;border-radius:6px;background-color:#fff}
+header .who{font-size:13px;opacity:.95;text-align:right;display:flex;align-items:center;gap:8px;flex-shrink:0}
+header .who button{background:var(--accent);color:var(--brand-darker);border:0;padding:6px 12px;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px;transition:transform .1s}
+header .who button:hover{transform:translateY(-1px)}
+main{padding:16px 20px;max-width:1800px;margin:0 auto;width:100%}
+@media (max-width:600px){main{padding:10px}}
+.card{background:var(--surface);border-radius:12px;padding:16px 20px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04),0 4px 16px rgba(10,40,20,.04);border:1px solid var(--border)}
+@media (max-width:600px){.card{padding:12px 14px;border-radius:10px}}
 label{display:block;font-size:12px;color:#555;margin-bottom:4px;margin-top:8px}
 input,select,textarea,button{font:inherit}
 /* font-size:16px prevents iOS Safari auto-zoom on focus */
 input,select,textarea{width:100%;padding:12px;border:1px solid #ccd;border-radius:8px;background:#fff;font-size:16px;min-height:44px}
 textarea{min-height:56px;resize:vertical;font-size:15px}
-button{cursor:pointer;border:0;border-radius:8px;padding:12px 14px;background:#1f7a3a;color:#fff;font-weight:600;min-height:44px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+button{cursor:pointer;border:0;border-radius:8px;padding:12px 18px;background:var(--brand);color:#fff;font-weight:600;min-height:44px;touch-action:manipulation;user-select:none;-webkit-user-select:none;transition:transform .08s,box-shadow .15s;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+button:hover{box-shadow:0 2px 8px rgba(31,122,58,.25)}
 button:active{transform:scale(.97)}
-button.ghost{background:#eef;color:#224}
+button.ghost{background:#eef2ee;color:#2b3b32;box-shadow:none}
+button.accent{background:var(--accent);color:var(--brand-darker)}
 button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 .row>*{flex:1 1 140px;min-width:0}
@@ -1409,9 +1469,10 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 .rate button.r0.on{background:#c33;color:#fff}
 .rate button.r1.on{background:#e0a020;color:#fff}
 .rate button.r2.on{background:#1f7a3a;color:#fff}
-.tabs{display:flex;gap:6px;margin-bottom:10px;position:sticky;top:0;background:#f4f6f8;padding:8px 0;z-index:2}
-.tabs button{flex:1;background:#dde;color:#223}
-.tabs button.active{background:#1f7a3a;color:#fff}
+.tabs{display:flex;gap:6px;margin-bottom:14px;padding:8px 0;z-index:2;flex-wrap:wrap}
+.tabs button{flex:1 1 140px;background:#fff;color:var(--brand-dark);border:1px solid var(--border);box-shadow:0 1px 2px rgba(0,0,0,.03);font-weight:600;min-height:44px;transition:all .15s;padding:10px 14px}
+.tabs button:hover{background:var(--accent-soft);border-color:var(--accent)}
+.tabs button.active{background:var(--brand);color:#fff;border-color:var(--brand-dark);box-shadow:0 2px 8px rgba(31,122,58,.25);border-bottom:3px solid var(--accent)}
 .score{font-size:28px;font-weight:700;color:#1f7a3a}
 .hist{padding:12px;border:1px solid #dde;border-radius:8px;margin-bottom:8px;background:#fff;display:flex;justify-content:space-between;align-items:center;gap:8px}
 .hist .meta{font-size:12px;color:#456;margin-top:2px}
@@ -1436,7 +1497,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 
 <main>
 
-<div id="loginScreen" class="card">
+<div id="loginScreen" class="card" style="max-width:480px;margin:40px auto">
   <div class="tabs" style="margin-bottom:12px">
     <button id="tabLoginBtn" class="active" onclick="showAuthTab('login')">Login</button>
     <button id="tabSignupBtn" onclick="showAuthTab('signup')">Sign Up</button>
@@ -1626,6 +1687,9 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 </main>
 
 <script>
+// Register service worker for PWA installability
+if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(() => {}); }
+
 const S = { manager:null, level:null, storeId:null, storeName:null, particulars:[], ratings:{}, remarks:{}, editingId:null,
             scResults:{}, scRemarks:{}, scSlot:null, scEditingId:null };
 

@@ -151,8 +151,11 @@ app.post('/api/signup', async (req, res) => {
     const existing = await sheetsGet('UserAccounts!A2:J');
     const dup = existing.some(r => (r[0]||'').trim().toLowerCase() === emailLc);
     if (dup) return res.json({ ok:false, error:'This email is already registered' });
-    // Bootstrap: if level is Regional Manager AND no approved RM exists yet, auto-approve this signup
+    // Regional Manager is restricted: ONLY allowed for the very first signup (bootstrap). After that, blocked.
     const anyApprovedRM = existing.some(r => (r[5]||'').trim() === 'Approved' && (r[3]||'').trim().toLowerCase() === 'regional manager');
+    if (level === 'Regional Manager' && anyApprovedRM) {
+      return res.json({ ok:false, error:'Regional Manager signup is disabled. Contact the current Regional Manager.' });
+    }
     const autoApprove = (level === 'Regional Manager' && !anyApprovedRM);
     const status = autoApprove ? 'Approved' : 'Pending';
     const approvedBy = autoApprove ? 'bootstrap (first RM)' : '';
@@ -164,6 +167,14 @@ app.post('/api/signup', async (req, res) => {
       ? 'Account created and auto-approved (first Regional Manager). You can now log in.'
       : 'Signup received. Waiting for Regional Manager approval.';
     res.json({ ok:true, message: msg, autoApproved: autoApprove });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/has-rm', async (req, res) => {
+  try {
+    const rows = await sheetsGet('UserAccounts!A2:J');
+    const hasRM = rows.some(r => (r[5]||'').trim() === 'Approved' && (r[3]||'').trim().toLowerCase() === 'regional manager');
+    res.json({ ok:true, hasRM });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -1611,7 +1622,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
       <div id="authSignup" style="display:none">
         <div class="auth-field"><label>Full name <span class="req">*</span></label><input id="suName" autocomplete="name"/></div>
         <div class="auth-field"><label>Email <span class="req">*</span></label><input id="suEmail" type="email" autocomplete="email"/></div>
-        <div class="auth-field"><label>Position <span class="req">*</span></label><select id="suLevel"><option value="">-- select your position --</option><option value="Regional Manager">Regional Manager</option><option value="Area Manager">Area Manager</option><option value="Store Manager">Store Manager</option></select></div>
+        <div class="auth-field"><label>Position <span class="req">*</span></label><select id="suLevel"><option value="">-- select your position --</option><option value="Regional Manager" id="suLevelRM" style="display:none">Regional Manager (bootstrap only)</option><option value="Area Manager">Area Manager</option><option value="Store Manager">Store Manager</option></select></div>
         <div id="suStoreSingle" class="auth-field" style="display:none"><label>Your Store <span class="req">*</span></label><select id="suStoreOne"><option value="">-- select your store --</option></select></div>
         <div id="suStoreMulti" class="auth-field" style="display:none"><label>Your Stores <span class="req">*</span> <span style="color:#789;font-weight:400;font-size:11px">(tick all stores you manage)</span></label><div id="suStoresBox" style="max-height:200px;overflow-y:auto;border:1px solid #d3dcd5;border-radius:8px;padding:8px 10px;background:#fafbfa"></div></div>
         <div class="auth-field"><label>Password <span class="req">*</span> <span style="color:#789;font-weight:400">(6+ characters)</span></label><div class="pw-wrap"><input id="suPass" type="password" autocomplete="new-password"/><button type="button" class="pw-toggle" data-pw-target="suPass">&#128065;</button></div></div>
@@ -1855,9 +1866,13 @@ async function doLogin(useLegacy){
 $('#loginBtn').onclick = () => doLogin(false);
 const legBtn = $('#loginLegacyBtn'); if (legBtn) legBtn.onclick = () => doLogin(true);
 
-// Load store list for signup form, populate single + multi selectors
+// Load store list for signup form + check if first-ever signup (reveals RM option)
 let SIGNUP_STORES = [];
 (async () => {
+  const rmCheck = await api('/api/has-rm');
+  if (rmCheck && rmCheck.ok && !rmCheck.hasRM) {
+    const rm = $('#suLevelRM'); if (rm) rm.style.display = '';
+  }
   const r = await api('/api/all-stores');
   if (!r.ok) return;
   SIGNUP_STORES = r.stores || [];

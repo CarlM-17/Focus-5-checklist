@@ -3430,6 +3430,12 @@ async function submitStock(){
 // Order matches existing Focus 5 Stock Status: Rice, Eggs, Poultry, Meat, Sugar
 const SKU_CAT_ORDER = ['RICE','EGGS','POULTRY','MEAT','SUGAR'];
 const SKU_CAT_ICONS = { RICE:'&#127834;', EGGS:'&#129370;', POULTRY:'&#128020;', MEAT:'&#129385;', SUGAR:'&#129474;' };
+// Normalize sheet sub-dept names into the 5 display categories (PORK/BEEF → MEAT)
+const skuGroupOf = (raw) => {
+  const u = (raw||'').trim().toUpperCase();
+  if (u === 'PORK' || u === 'BEEF') return 'MEAT';
+  return u;
+};
 let SKU_STATE = { items: [], statuses: {}, remarks: {}, expanded: { RICE:true, EGGS:true, POULTRY:true, MEAT:true, SUGAR:true } };
 
 async function loadSKUChecklist(){
@@ -3450,7 +3456,7 @@ async function loadSKUChecklist(){
   (latestRes.entries || []).forEach(e => { prev[e.sku + '||' + e.category] = { status: e.status, remarks: e.remarks || '' }; });
   SKU_STATE.statuses = {}; SKU_STATE.remarks = {};
   skuRes.items.forEach(it => {
-    const k = it.sku + '||' + (it.category||'').trim().toUpperCase();
+    const k = it.sku + '||' + (it.category||'').trim().toUpperCase(); // key uses ORIGINAL category (PORK stays PORK)
     if (prev[k]) { SKU_STATE.statuses[k] = prev[k].status; SKU_STATE.remarks[k] = prev[k].remarks; }
   });
   renderSKUChecklist(latestRes);
@@ -3459,14 +3465,18 @@ async function loadSKUChecklist(){
 function renderSKUChecklist(latestRes){
   const today = todayStr();
   const hasExisting = latestRes && (latestRes.entries || []).length > 0;
-  // Group items by category (upper-cased for matching)
+  // Group items by DISPLAY category (PORK/BEEF both bucket under MEAT)
   const byCat = {};
   SKU_STATE.items.forEach(it => {
-    const c = (it.category || '').trim().toUpperCase();
+    const c = skuGroupOf(it.category);
     (byCat[c] = byCat[c] || []).push(it);
   });
-  // Sort each category by rank
-  Object.values(byCat).forEach(list => list.sort((a,b) => (a.rank||99) - (b.rank||99)));
+  // Sort each category: by original sub-category first (so PORK then BEEF stay grouped), then by rank
+  Object.values(byCat).forEach(list => list.sort((a,b) => {
+    const ca = (a.category||'').toUpperCase(), cb = (b.category||'').toUpperCase();
+    if (ca !== cb) return ca.localeCompare(cb);
+    return (a.rank||99) - (b.rank||99);
+  }));
 
   // Build sections in requested order (Rice, Eggs, Poultry, Meat, Sugar)
   const sectionsHtml = SKU_CAT_ORDER.map(cat => {
@@ -3475,11 +3485,12 @@ function renderSKUChecklist(latestRes){
       <div style="font-weight:700;color:#1f7a3a">\${SKU_CAT_ICONS[cat]||''} \${toTitle(cat)}</div>
       <div class="muted" style="margin-top:6px;font-size:12px">No SKUs listed for this category.</div>
     </div>\`;
-    const avail = items.filter(it => SKU_STATE.statuses[it.sku+'||'+cat] === 'Available').length;
-    const oos   = items.filter(it => SKU_STATE.statuses[it.sku+'||'+cat] === 'OOS').length;
+    const keyFor = (it) => it.sku + '||' + (it.category||'').trim().toUpperCase();
+    const avail = items.filter(it => SKU_STATE.statuses[keyFor(it)] === 'Available').length;
+    const oos   = items.filter(it => SKU_STATE.statuses[keyFor(it)] === 'OOS').length;
     const unset = items.length - avail - oos;
     const expanded = SKU_STATE.expanded[cat];
-    const rowsHtml = expanded ? items.map(it => skuRowHTML(it, cat)).join('') : '';
+    const rowsHtml = expanded ? items.map(it => skuRowHTML(it)).join('') : '';
     return \`<div class="card" style="padding:0;overflow:hidden">
       <div style="padding:12px 14px;background:#eef7ec;border-left:4px solid #1f7a3a;cursor:pointer;display:flex;align-items:center;gap:10px" onclick="toggleSKUCat('\${cat}')">
         <div style="font-size:22px">\${SKU_CAT_ICONS[cat]||''}</div>
@@ -3535,24 +3546,28 @@ function renderSKUChecklist(latestRes){
   $('#skuSubmitBtn').onclick = submitSKUChecklist;
 }
 
-function skuRowHTML(it, cat){
-  const k = it.sku + '||' + cat;
+function skuRowHTML(it){
+  const origCat = (it.category||'').trim().toUpperCase();
+  const k = it.sku + '||' + origCat;
   const st = SKU_STATE.statuses[k];
   const rm = SKU_STATE.remarks[k] || '';
   const btn = (val, bg) => {
     const on = st === val;
-    return \`<button type="button" data-sku="\${escapeHtml(it.sku)}" data-cat="\${cat}" data-val="\${val}" onclick="setSKUStatus(this)" style="flex:1;background:\${on?bg:'#eef'};color:\${on?'#fff':'#334'};border:0;border-radius:6px;padding:8px 4px;font-weight:700;cursor:pointer;font-size:13px">\${val}</button>\`;
+    return \`<button type="button" data-sku="\${escapeHtml(it.sku)}" data-cat="\${origCat}" data-val="\${val}" onclick="setSKUStatus(this)" style="flex:1;background:\${on?bg:'#eef'};color:\${on?'#fff':'#334'};border:0;border-radius:6px;padding:8px 4px;font-weight:700;cursor:pointer;font-size:13px">\${val}</button>\`;
   };
+  // Show sub-category tag when it differs from the display group (so PORK/BEEF are visible inside Meat section)
+  const displayGroup = skuGroupOf(origCat);
+  const subTag = (origCat && origCat !== displayGroup) ? \`<span style="background:#eef;color:#334;font-weight:600;font-size:10px;padding:1px 6px;border-radius:3px;margin-left:4px">\${escapeHtml(origCat)}</span>\` : '';
   return \`<div style="padding:10px 0;border-bottom:1px dashed #eee">
     <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
       <span style="background:#1f7a3a;color:#fff;font-weight:700;font-size:11px;padding:2px 7px;border-radius:4px;min-width:26px;text-align:center">#\${it.rank||'?'}</span>
       <div style="flex:1">
-        <div style="font-weight:600;font-size:13px;color:#223;line-height:1.3">\${escapeHtml(it.description||it.sku)}</div>
+        <div style="font-weight:600;font-size:13px;color:#223;line-height:1.3">\${escapeHtml(it.description||it.sku)}\${subTag}</div>
         <div style="font-size:11px;color:#789;margin-top:1px">\${escapeHtml(it.sku||'')} &middot; \${escapeHtml(it.supplier||'')} &middot; \${escapeHtml(it.skuType||'')}</div>
       </div>
     </div>
     <div style="display:flex;gap:6px;margin-bottom:4px">\${btn('Available','#1f7a3a')}\${btn('OOS','#c33')}</div>
-    \${st==='OOS' ? \`<textarea data-sku-remarks="\${escapeHtml(it.sku)}" data-cat="\${cat}" oninput="setSKURemarks(this)" placeholder="Remarks for this OOS SKU (optional)" style="min-height:36px;font-size:12px;margin-top:4px">\${escapeHtml(rm)}</textarea>\` : ''}
+    \${st==='OOS' ? \`<textarea data-sku-remarks="\${escapeHtml(it.sku)}" data-cat="\${origCat}" oninput="setSKURemarks(this)" placeholder="Remarks for this OOS SKU (optional)" style="min-height:36px;font-size:12px;margin-top:4px">\${escapeHtml(rm)}</textarea>\` : ''}
   </div>\`;
 }
 
@@ -3575,9 +3590,10 @@ function toggleSKUCat(cat){
 async function submitSKUChecklist(){
   $('#skuErr').textContent = '';
   const entries = SKU_STATE.items.map(it => {
-    const k = it.sku + '||' + (it.category||'').trim().toUpperCase();
+    const origCat = (it.category||'').trim().toUpperCase();
+    const k = it.sku + '||' + origCat;
     return {
-      category: (it.category||'').trim().toUpperCase(),
+      category: origCat, // preserve PORK/BEEF/etc. in the saved sheet
       rank: it.rank, sku: it.sku, description: it.description,
       status: SKU_STATE.statuses[k] || '',
       remarks: SKU_STATE.remarks[k] || ''

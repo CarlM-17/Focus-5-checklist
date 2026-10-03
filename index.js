@@ -1005,6 +1005,189 @@ app.get('/api/sku-history-detail', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// ---------- Stock Review (Area Manager validates each store/slot) ----------
+const REVIEW_DEADLINE_HR = { AM: 11, PM: 16 }; // PH local
+
+app.post('/api/review-submit', async (req, res) => {
+  try {
+    const { manager, store, date, slot } = req.body || {};
+    if (!manager || !store || !date || !slot) return res.json({ ok:false, error:'Missing fields' });
+    if (!['AM','PM'].includes(slot)) return res.json({ ok:false, error:'Invalid slot (AM or PM only)' });
+    const existing = await sheetsGet('StockReviewData!A2:I');
+    const already = existing.some(r =>
+      (r[8] || 'ACTIVE') === 'ACTIVE' &&
+      (r[2] || '').trim().toLowerCase() === manager.trim().toLowerCase() &&
+      (r[3] || '').trim() === store &&
+      r[4] === date &&
+      (r[5] || '').trim().toUpperCase() === slot
+    );
+    if (already) return res.json({ ok:false, error: slot + ' review for ' + store + ' on ' + date + ' already recorded' });
+    const ts = new Date().toISOString();
+    const id = 'RV' + Date.now();
+    const row = [[ts, id, manager, store, date, slot, 'Validated', '', 'ACTIVE']];
+    await sheetsAppend('StockReviewData!A1:I1', row);
+    res.json({ ok:true, reviewId: id });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/review-pending', async (req, res) => {
+  try {
+    const manager = (req.query.manager || '').trim().toLowerCase();
+    const date = (req.query.date || '').trim();
+    if (!manager || !date) return res.json({ ok:false, error:'manager and date required' });
+
+    // AM's assigned stores
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const myStores = stores
+      .filter(r => (r[6] || '').trim().toLowerCase() === manager)
+      .map(r => ({ name: (r[4]||'').trim(), area: r[2] || '' }))
+      .filter(s => s.name);
+
+    // Store Manager SKU Checklist for the date, grouped by (store, slot)
+    const skuRows = await sheetsGet('SKUChecklistData!A2:M');
+    const skuBySlot = {};
+    skuRows.forEach(r => {
+      if ((r[12] || 'ACTIVE') !== 'ACTIVE') return;
+      if (r[4] !== date) return;
+      const store = (r[3] || '').trim();
+      const slot = ((r[5] || 'AM') + '').trim().toUpperCase();
+      const k = store + '||' + slot;
+      if (!skuBySlot[k] || r[1] > skuBySlot[k].id) skuBySlot[k] = { id: r[1], timestamp: r[0] };
+    });
+    const aggSKU = {};
+    skuRows.forEach(r => {
+      if ((r[12] || 'ACTIVE') !== 'ACTIVE') return;
+      if (r[4] !== date) return;
+      const store = (r[3] || '').trim();
+      const slot = ((r[5] || 'AM') + '').trim().toUpperCase();
+      const k = store + '||' + slot;
+      if (!skuBySlot[k] || skuBySlot[k].id !== r[1]) return;
+      aggSKU[k] = aggSKU[k] || { total:0, available:0, oos:0, timestamp:skuBySlot[k].timestamp };
+      aggSKU[k].total++;
+      const st = (r[10] || '').trim();
+      if (st === 'Available') aggSKU[k].available++;
+      else if (st === 'OOS') aggSKU[k].oos++;
+    });
+    // Compute SKU on-time (SM deadlines 10 / 15)
+    Object.keys(aggSKU).forEach(k => {
+      const o = aggSKU[k];
+      const sub = new Date(o.timestamp);
+      const phHour = (sub.getUTCHours() + 8) % 24;
+      const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const slotKey = k.split('||')[1];
+      const dl = slotKey === 'AM' ? 10 : 15;
+      o.onTime = (subDatePH < date) || (subDatePH === date && phHour < dl);
+    });
+
+    // AM's reviews for the date
+    const reviewRows = await sheetsGet('StockReviewData!A2:I');
+    const reviewByKey = {};
+    reviewRows.forEach(r => {
+      if ((r[8] || 'ACTIVE') !== 'ACTIVE') return;
+      if ((r[2] || '').trim().toLowerCase() !== manager) return;
+      if (r[4] !== date) return;
+      const k = (r[3] || '').trim() + '||' + ((r[5] || '') + '').trim().toUpperCase();
+      const o = { timestamp: r[0] };
+      const sub = new Date(r[0]);
+      const phHour = (sub.getUTCHours() + 8) % 24;
+      const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const slotKey = k.split('||')[1];
+      const dl = REVIEW_DEADLINE_HR[slotKey] || 11;
+      o.onTime = (subDatePH < date) || (subDatePH === date && phHour < dl);
+      reviewByKey[k] = o;
+    });
+
+    const items = [];
+    myStores.forEach(s => {
+      ['AM','PM'].forEach(slot => {
+        const k = s.name + '||' + slot;
+        const sku = aggSKU[k];
+        const review = reviewByKey[k];
+        items.push({
+          store: s.name, area: s.area, slot,
+          skuSubmitted: !!sku,
+          skuAvailable: sku ? sku.available : 0,
+          skuOOS:       sku ? sku.oos       : 0,
+          skuTotal:     sku ? sku.total     : 0,
+          skuOnTime:    sku ? sku.onTime    : null,
+          skuTimestamp: sku ? sku.timestamp : null,
+          reviewed: !!review,
+          reviewTimestamp: review ? review.timestamp : null,
+          reviewOnTime:    review ? review.onTime    : null
+        });
+      });
+    });
+
+    res.json({ ok:true, items });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/review-monitor', async (req, res) => {
+  try {
+    const date = (req.query.date || '').trim();
+    const amRows = await sheetsGet('AreaManagers!A2:C');
+    const ams = amRows.filter(r => (r[2] || '').trim().toLowerCase() === 'area manager').map(r => (r[0] || '').trim()).filter(Boolean);
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const amStores = {};
+    stores.forEach(r => {
+      const am = (r[6] || '').trim();
+      const st = (r[4] || '').trim();
+      if (!am || !st) return;
+      amStores[am] = amStores[am] || [];
+      amStores[am].push(st);
+    });
+
+    const reviewRows = await sheetsGet('StockReviewData!A2:I');
+    const skuRows    = await sheetsGet('SKUChecklistData!A2:M');
+
+    // Index SKU submissions for date: (store, slot) -> true
+    const skuExists = {};
+    skuRows.forEach(r => {
+      if ((r[12] || 'ACTIVE') !== 'ACTIVE') return;
+      if (date && r[4] !== date) return;
+      const k = (r[3] || '').trim() + '||' + ((r[5] || 'AM') + '').trim().toUpperCase();
+      skuExists[k] = true;
+    });
+
+    // Index reviews for date: (am, store, slot) -> { onTime }
+    const reviewExists = {};
+    reviewRows.forEach(r => {
+      if ((r[8] || 'ACTIVE') !== 'ACTIVE') return;
+      if (date && r[4] !== date) return;
+      const slotKey = ((r[5] || '') + '').trim().toUpperCase();
+      const k = (r[2] || '').trim() + '||' + (r[3] || '').trim() + '||' + slotKey;
+      const sub = new Date(r[0]);
+      const phHour = (sub.getUTCHours() + 8) % 24;
+      const subDatePH = new Date(sub.getTime() + 8*3600*1000).toISOString().slice(0,10);
+      const dl = REVIEW_DEADLINE_HR[slotKey] || 11;
+      const onTime = (subDatePH < (r[4]||date)) || (subDatePH === (r[4]||date) && phHour < dl);
+      reviewExists[k] = { onTime };
+    });
+
+    const amStats = ams.map(am => {
+      const mstores = amStores[am] || [];
+      let total = mstores.length * 2; // AM+PM per store
+      let reviewed = 0, late = 0;
+      mstores.forEach(st => ['AM','PM'].forEach(slot => {
+        const rev = reviewExists[am + '||' + st + '||' + slot];
+        if (rev) { reviewed++; if (!rev.onTime) late++; }
+      }));
+      return {
+        manager: am,
+        storesCount: mstores.length,
+        slotsTotal: total,
+        reviewed,
+        pending: total - reviewed,
+        late,
+        rate: total ? Math.round((reviewed / total) * 100) : 0
+      };
+    });
+
+    const pendingAMs = amStats.filter(a => a.pending > 0);
+    res.json({ ok:true, amStats, pendingAMs });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.get('/api/am-stores', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
@@ -1473,7 +1656,7 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   $('#tabSCheck').classList.toggle('hidden', t!=='scheck');
   $('#tabStock').classList.toggle('hidden', t!=='stock');
   $('#tabSkuChk').classList.toggle('hidden', t!=='skuchk');
-  if (t==='stock') loadStockTab();
+  if (t==='stock') { const lvl=(S.level||'').toLowerCase(); if (lvl==='area manager') loadReviewTab(); else loadStockTab(); }
   if (t==='skuchk') loadSKUChecklist();
   if (t==='hist') loadHistory();
   if (t==='sum') { if(!$('#sumFrom').value){ $('#sumFrom').value = todayStr(-30); $('#sumTo').value = todayStr(); } loadSummary(); }
@@ -2708,7 +2891,32 @@ async function loadStockTab(){
     </div>
     \${weeklyProgressInAppHTML}
   </div>\` : '';
-  $('#stockOut').innerHTML = kpiRow2 + filterCard + missingHtml + chartCard + formCard + tableCard + urgentCard + watchCard + weeklyProgressCard + historyCard;
+  // RM-only: fetch AM review completion for today
+  let amReviewCard = '';
+  if ((S.level||'').toLowerCase() === 'regional manager') {
+    const rv = await api('/api/review-monitor?date=' + todayStr());
+    if (rv.ok) {
+      const amStats = rv.amStats || [];
+      const totalExpected = amStats.reduce((n,a) => n + a.slotsTotal, 0);
+      const totalDone     = amStats.reduce((n,a) => n + a.reviewed, 0);
+      const totalLate     = amStats.reduce((n,a) => n + a.late, 0);
+      const complianceRate = totalExpected ? Math.round((totalDone / totalExpected) * 100) : 0;
+      const pendingAMs = amStats.filter(a => a.pending > 0);
+      const chips = pendingAMs.map(a => \`<span style="display:inline-block;background:#fff;color:#c33;border:1px solid #f5b1b1;padding:4px 10px;border-radius:20px;margin:3px 4px 3px 0;font-weight:600;font-size:12px">&#9888; \${escapeHtml(a.manager)} <span style="background:#c33;color:#fff;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;margin-left:4px">\${a.pending} pending</span></span>\`).join('');
+      amReviewCard = \`<div class="card" style="border-left:6px solid \${pendingAMs.length?'#c33':'#1f7a3a'};background:\${pendingAMs.length?'linear-gradient(135deg,#fff5f5 0%,#ffe8e8 100%)':'#f0faf3'}">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="font-size:28px">\${pendingAMs.length ? '&#128680;' : '&#9989;'}</div>
+          <div style="flex:1">
+            <div style="color:\${pendingAMs.length?'#c33':'#1f7a3a'};font-weight:800;font-size:15px">AM REVIEW COMPLIANCE: \${complianceRate}%</div>
+            <div style="font-size:13px;color:#345;margin-top:3px"><b>\${totalDone}</b> of <b>\${totalExpected}</b> store-slot reviews done\${totalLate?' - <b style="color:#c33">'+totalLate+' late</b>':''}</div>
+          </div>
+          <div style="text-align:center;padding:8px 14px;background:\${pendingAMs.length?'#c33':'#1f7a3a'};color:#fff;border-radius:8px;font-weight:800;font-size:20px;min-width:60px">\${amStats.length - pendingAMs.length}/\${amStats.length}</div>
+        </div>
+        \${pendingAMs.length ? '<div style="padding-top:8px;border-top:1px dashed #f0b0b0;margin-top:8px"><div style="font-size:11px;color:#789;margin-bottom:4px">AMs with pending reviews:</div>'+chips+'</div>' : ''}
+      </div>\`;
+    }
+  }
+  $('#stockOut').innerHTML = kpiRow2 + filterCard + missingHtml + amReviewCard + chartCard + formCard + tableCard + urgentCard + watchCard + weeklyProgressCard + historyCard;
 
   $('#stockApplyBtn').onclick = () => { STOCK_STATE.from = $('#stockFrom').value; STOCK_STATE.to = $('#stockTo').value; STOCK_STATE.singleDate = null; loadStockTab(); };
   $('#stockExportBtn').onclick = exportStockExcel;
@@ -3506,6 +3714,111 @@ async function submitStock(){
   if (!r.ok) { $('#stockErr').textContent = r.error || 'Failed'; return; }
   alert('Stock Status Report submitted');
   loadStockTab();
+}
+
+// ---- Stock Review (Area Manager) ----
+let REVIEW_STATE = { items: [], loading: false };
+
+async function loadReviewTab(){
+  const out = $('#stockOut');
+  out.innerHTML = '<div class="card muted">Loading reviews...</div>';
+  const date = todayStr();
+  const [pendingRes, monitorRes] = await Promise.all([
+    api('/api/review-pending?manager=' + encodeURIComponent(S.manager) + '&date=' + date),
+    api('/api/review-monitor?date=' + date)
+  ]);
+  if (!pendingRes.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(pendingRes.error||'Failed')+'</div>'; return; }
+  REVIEW_STATE.items = pendingRes.items || [];
+
+  const items = REVIEW_STATE.items;
+  const amItems = items.filter(x => x.slot === 'AM');
+  const pmItems = items.filter(x => x.slot === 'PM');
+  const nowHr = new Date().getHours();
+  const amDeadlinePassed = nowHr >= 11;
+  const pmDeadlinePassed = nowHr >= 16;
+
+  const totalSlots = items.length;
+  const reviewed = items.filter(x => x.reviewed).length;
+  const pending  = items.filter(x => !x.reviewed && x.skuSubmitted).length;
+  const notYetSubmittedBySM = items.filter(x => !x.skuSubmitted).length;
+
+  const kpi = (icon, num, lbl, bg) => \`<div style="flex:1 1 140px;min-width:0;background:\${bg};color:#fff;padding:14px;border-radius:10px">
+    <div style="font-size:20px;opacity:.9;line-height:1">\${icon}</div>
+    <div style="font-size:28px;font-weight:800;margin-top:6px;line-height:1">\${num}</div>
+    <div style="font-size:12px;opacity:.95;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.4px">\${lbl}</div>
+  </div>\`;
+  const headerCard = \`<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h3 style="margin:0;color:#1f7a3a">Focus 5 Stock Status - Review &amp; Validate</h3>
+      <span style="background:#e8f5ec;color:#1f7a3a;font-weight:600;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #b7dcc3">\${escapeHtml(S.manager)}</span>
+      <span style="background:#eef;color:#334;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">\${date}</span>
+    </div>
+    <div style="margin-bottom:10px;padding:10px 12px;background:#fff8e1;border-left:4px solid #e0a020;border-radius:4px;font-size:12px;color:#5a4300">
+      <b style="color:#a06800">DEADLINES:</b> Validate <b>AM slot</b> submissions before <b>11:00 AM</b> and <b>PM slot</b> submissions before <b>4:00 PM</b>. Reviews are per store per slot. Store Managers' SKU Checklist must be submitted first.
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      \${kpi('&#128202;', totalSlots, 'Total Slot Reviews', '#345')}
+      \${kpi('&#9989;',   reviewed,   'Reviewed Today',   '#1f7a3a')}
+      \${kpi('&#9203;',   pending,    'Pending (SM Done)','#e0a020')}
+      \${kpi('&#9888;',   notYetSubmittedBySM, 'SM Not Yet', '#c33')}
+    </div>
+  </div>\`;
+
+  const renderSection = (title, slot, deadlineHr, items2, deadlinePassed) => \`<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">\${title}</h3>
+      <span style="background:\${deadlinePassed?'#c33':'#e0a020'};color:#fff;font-weight:600;font-size:11px;padding:3px 10px;border-radius:12px">Deadline \${deadlineHr}:00 \${deadlinePassed?'(PASSED)':''}</span>
+    </div>
+    \${items2.length ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px">' + items2.map(x => reviewCardHTML(x, deadlinePassed)).join('') + '</div>' : '<div class="muted" style="padding:10px">No stores assigned.</div>'}
+  </div>\`;
+
+  const amSection = renderSection('AM Slot Reviews', 'AM', 11, amItems, amDeadlinePassed);
+  const pmSection = renderSection('PM Slot Reviews', 'PM', 16, pmItems, pmDeadlinePassed);
+
+  out.innerHTML = headerCard + amSection + pmSection;
+  document.querySelectorAll('[data-review-store]').forEach(b => b.onclick = () => doReview(b.dataset.reviewStore, b.dataset.reviewSlot));
+}
+
+function reviewCardHTML(x, deadlinePassed){
+  const DARK = '#1f7a3a', OOS = '#c33', AMBER = '#e0a020';
+  let statusBadge, borderColor, bgTint;
+  if (x.reviewed) {
+    statusBadge = x.reviewOnTime
+      ? '<span style="background:'+DARK+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">VALIDATED</span>'
+      : '<span style="background:'+OOS+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">VALIDATED (LATE)</span>';
+    borderColor = x.reviewOnTime ? DARK : OOS; bgTint = '#f4faf6';
+  } else if (!x.skuSubmitted) {
+    statusBadge = '<span style="background:'+OOS+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">SM NOT YET</span>';
+    borderColor = OOS; bgTint = '#fff5f5';
+  } else {
+    statusBadge = deadlinePassed
+      ? '<span style="background:'+OOS+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">PENDING (LATE)</span>'
+      : '<span style="background:'+AMBER+';color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">PENDING</span>';
+    borderColor = AMBER; bgTint = '#fffdf6';
+  }
+  const skuStat = x.skuSubmitted
+    ? '<div style="font-size:12px;color:#456;margin-top:4px"><span style="color:'+DARK+';font-weight:700">'+x.skuAvailable+' Available</span> · <span style="color:'+OOS+';font-weight:700">'+x.skuOOS+' OOS</span> · <span style="color:#789">'+x.skuTotal+' total</span></div>'
+      + '<div style="font-size:11px;color:#789;margin-top:2px">SM submitted ' + new Date(x.skuTimestamp).toLocaleString() + (x.skuOnTime ? '' : ' <b style="color:'+OOS+'">LATE</b>') + '</div>'
+    : '<div style="font-size:11px;color:#c33;margin-top:4px">Store Manager has not submitted SKU Checklist for this slot yet.</div>';
+  const reviewInfo = x.reviewed
+    ? '<div style="font-size:11px;color:#789;margin-top:4px">Reviewed ' + new Date(x.reviewTimestamp).toLocaleString() + '</div>'
+    : '';
+  const btn = (!x.reviewed && x.skuSubmitted)
+    ? '<button data-review-store="'+escapeHtml(x.store)+'" data-review-slot="'+x.slot+'" style="margin-top:8px;width:100%;background:'+DARK+';color:#fff;border:0;padding:10px;border-radius:6px;font-weight:700;cursor:pointer">Validate</button>'
+    : '';
+  return '<div style="border:1px solid #ddd;border-left:4px solid '+borderColor+';background:'+bgTint+';border-radius:6px;padding:10px">'
+    + '<div style="display:flex;align-items:center;gap:6px"><b style="font-size:13px;color:#223;flex:1">'+escapeHtml(x.store)+'</b>'+statusBadge+'</div>'
+    + '<div style="font-size:11px;color:#789;margin-top:2px">'+escapeHtml(x.area||'')+'</div>'
+    + skuStat + reviewInfo + btn
+    + '</div>';
+}
+
+async function doReview(store, slot){
+  if (!confirm('Validate ' + slot + ' slot for ' + store + '? This records your sign-off and cannot be undone.')) return;
+  const r = await api('/api/review-submit', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ manager: S.manager, store, date: todayStr(), slot }) });
+  if (!r.ok) { alert(r.error || 'Failed'); return; }
+  loadReviewTab();
 }
 
 // ---- Focus 5 SKU Checklist (Store Manager only) ----

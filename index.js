@@ -3641,6 +3641,12 @@ function renderSKUChecklist(latestRes){
       \${kpi('&#9989;',   totalAvail, 'Available today', '#1f7a3a')}
       \${kpi('&#10060;',  totalOOS,   'OOS today', '#c33')}
       \${kpi('&#128221;', (todayRow?todayRow.total:0), 'Submitted', '#345')}
+      \${(function(){
+        const submittedCount = (todayRow ? todayRow.total : 0);
+        const passRate = submittedCount ? Math.round((totalAvail / submittedCount) * 100) : 0;
+        const bg = passRate >= 90 ? '#1f7a3a' : passRate >= 70 ? '#e0a020' : '#c33';
+        return kpi('&#127919;', passRate + '%', 'Pass Rate', bg);
+      })()}
     </div>
   </div>\`;
 

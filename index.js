@@ -1435,11 +1435,11 @@ app.get('/api/sku-detail', async (req, res) => {
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     const catFilter = (req.query.category || '').trim().toUpperCase();
-    const storeFilter = (req.query.store || '').trim().toLowerCase();
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const storeFilterKey = normKey(req.query.store || '');
     const statusFilter = (req.query.status || '').trim(); // 'OOS' | 'Available' | '' (all)
     let assignedList = [];
     try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) {}
-    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
     const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
 
     const stores = await sheetsGet('ListOfStores!A2:G');
@@ -1451,7 +1451,7 @@ app.get('/api/sku-detail', async (req, res) => {
         const nk = normKey(r[4]), ik = normKey(r[3]);
         if (!(assignedKeys.has(nk) || assignedKeys.has(ik))) return;
       }
-      scopeIds.add((r[4]||'').trim().toLowerCase());
+      scopeIds.add(normKey(r[4]));
     });
 
     const groupOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
@@ -1463,10 +1463,10 @@ app.get('/api/sku-detail', async (req, res) => {
       const d = r[4]; if (!d) return;
       if (from && d < from) return;
       if (to && d > to) return;
-      const storeLc = (r[3]||'').trim().toLowerCase();
-      if (!scopeIds.has(storeLc)) return;
-      if (storeFilter && storeLc !== storeFilter) return;
-      const k = storeLc + '||' + d + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      const storeKey = normKey(r[3]);
+      if (!scopeIds.has(storeKey)) return;
+      if (storeFilterKey && storeKey !== storeFilterKey) return;
+      const k = storeKey + '||' + d + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
       if (!latest[k] || r[1] > latest[k]) latest[k] = r[1];
     });
     const entries = [];
@@ -1475,11 +1475,11 @@ app.get('/api/sku-detail', async (req, res) => {
       const d = r[4]; if (!d) return;
       if (from && d < from) return;
       if (to && d > to) return;
-      const storeLc = (r[3]||'').trim().toLowerCase();
-      if (!scopeIds.has(storeLc)) return;
-      if (storeFilter && storeLc !== storeFilter) return;
+      const storeKey = normKey(r[3]);
+      if (!scopeIds.has(storeKey)) return;
+      if (storeFilterKey && storeKey !== storeFilterKey) return;
       const slot = ((r[5]||'AM')+'').trim().toUpperCase();
-      const k = storeLc + '||' + d + '||' + slot;
+      const k = storeKey + '||' + d + '||' + slot;
       if (latest[k] !== r[1]) return;
       const grp = groupOf(r[6]);
       if (catFilter && grp !== catFilter) return;

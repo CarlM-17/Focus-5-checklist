@@ -1211,15 +1211,19 @@ app.post('/api/sku-submit', async (req, res) => {
     }
     const twoDaysAgo = new Date(Date.now() - 2*86400*1000).toISOString().slice(0,10);
     if (date < twoDaysAgo) return res.json({ ok:false, error:'Back-dated checklists are not allowed' });
-    // Lock per (mgr, date, slot): one submission per slot per day
+    // Lock per (store, date, slot): one submission per slot per day per store
+    // (shared across co-managers of the same store)
     const existing = await sheetsGet('SKUChecklistData!A2:M');
-    const alreadySubmitted = existing.some(r =>
+    const alreadyRow = existing.find(r =>
       skuRowRecStatus(r) === 'ACTIVE' &&
-      (r[2] || '').trim().toLowerCase() === storeMgr.trim().toLowerCase() &&
+      (r[3] || '').trim().toLowerCase() === String(store).trim().toLowerCase() &&
       r[4] === date &&
       skuRowSlot(r) === slot
     );
-    if (alreadySubmitted) return res.json({ ok:false, error: slot + ' slot for ' + date + ' is already submitted. Submissions are locked once sent.' });
+    if (alreadyRow) {
+      const by = (alreadyRow[2] || '').trim();
+      return res.json({ ok:false, error: slot + ' slot for ' + date + ' was already submitted' + (by ? ' by ' + by : '') + '. Only one submission per store per slot per day.' });
+    }
     const ts = new Date().toISOString();
     const id = 'KS' + Date.now();
     const rows = entries.map(e => [
@@ -1235,13 +1239,14 @@ app.post('/api/sku-submit', async (req, res) => {
 app.get('/api/sku-latest', async (req, res) => {
   try {
     const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const store = (req.query.store || '').trim().toLowerCase();
     const date = (req.query.date || '').trim();
     const slot = (req.query.slot || '').trim().toUpperCase();
-    if (!storeMgr || !date) return res.json({ ok:false, error:'storeMgr and date required' });
+    if ((!store && !storeMgr) || !date) return res.json({ ok:false, error:'store (or storeMgr) and date required' });
     const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
       skuRowRecStatus(r) === 'ACTIVE' &&
-      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      (store ? (r[3] || '').trim().toLowerCase() === store : (r[2] || '').trim().toLowerCase() === storeMgr) &&
       r[4] === date &&
       (!slot || skuRowSlot(r) === slot)
     );
@@ -1257,13 +1262,14 @@ app.get('/api/sku-latest', async (req, res) => {
 app.get('/api/sku-history', async (req, res) => {
   try {
     const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const store = (req.query.store || '').trim().toLowerCase();
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
-    if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
+    if (!store && !storeMgr) return res.json({ ok:false, error:'store (or storeMgr) required' });
     const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
       skuRowRecStatus(r) === 'ACTIVE' &&
-      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      (store ? (r[3] || '').trim().toLowerCase() === store : (r[2] || '').trim().toLowerCase() === storeMgr) &&
       (!from || (r[4] || '') >= from) &&
       (!to   || (r[4] || '') <= to)
     );
@@ -1423,13 +1429,14 @@ function todayLocalPHstr(){
 app.get('/api/sku-history-detail', async (req, res) => {
   try {
     const storeMgr = (req.query.storeMgr || '').trim().toLowerCase();
+    const store = (req.query.store || '').trim().toLowerCase();
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
-    if (!storeMgr) return res.json({ ok:false, error:'storeMgr required' });
+    if (!store && !storeMgr) return res.json({ ok:false, error:'store (or storeMgr) required' });
     const rows = await sheetsGet('SKUChecklistData!A2:M');
     const filtered = rows.filter(r =>
       skuRowRecStatus(r) === 'ACTIVE' &&
-      (r[2] || '').trim().toLowerCase() === storeMgr &&
+      (store ? (r[3] || '').trim().toLowerCase() === store : (r[2] || '').trim().toLowerCase() === storeMgr) &&
       (!from || (r[4] || '') >= from) &&
       (!to   || (r[4] || '') <= to)
     );
@@ -4824,8 +4831,8 @@ async function loadSKUChecklist(){
   if (!SKU_STATE.currentSlot) SKU_STATE.currentSlot = autoSKUSlot();
   const [skuRes, latestRes, histRes] = await Promise.all([
     api('/api/sku-list?storeId=' + encodeURIComponent(S.storeId||'') + '&store=' + encodeURIComponent(S.storeName||'')),
-    api('/api/sku-latest?storeMgr=' + encodeURIComponent(S.manager) + '&date=' + SKU_STATE.viewDate + '&slot=' + SKU_STATE.currentSlot),
-    api('/api/sku-history?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
+    api('/api/sku-latest?store=' + encodeURIComponent(S.storeName||'') + '&date=' + SKU_STATE.viewDate + '&slot=' + SKU_STATE.currentSlot),
+    api('/api/sku-history?store=' + encodeURIComponent(S.storeName||'') + '&from=' + SKU_STATE.histFrom + '&to=' + SKU_STATE.histTo)
   ]);
   // Backend now returns per-slot entries. Convert to legacy "days" shape (one row per date, aggregating AM+PM) for existing render code.
   const histEntries = (histRes && histRes.entries) || [];
@@ -5120,7 +5127,7 @@ function toggleSKUCat(cat){
 async function exportSKUHistoryExcel(){
   const btn = $('#skuExportBtn'); const orig = btn ? btn.textContent : ''; if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
   try {
-    const r = await api('/api/sku-history-detail?storeMgr=' + encodeURIComponent(S.manager) + '&from=' + encodeURIComponent(SKU_STATE.histFrom) + '&to=' + encodeURIComponent(SKU_STATE.histTo));
+    const r = await api('/api/sku-history-detail?store=' + encodeURIComponent(S.storeName||'') + '&from=' + encodeURIComponent(SKU_STATE.histFrom) + '&to=' + encodeURIComponent(SKU_STATE.histTo));
     if (!r.ok) { alert(r.error || 'Export failed'); return; }
     if (!r.entries.length) { alert('No submissions in this date range.'); return; }
     const DARK = '#1f7a3a', DARKER = '#155a2b', LIGHT_BG = '#e8f5ec', LIGHTER = '#f4faf6', OOS_C = '#c33';

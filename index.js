@@ -1370,20 +1370,28 @@ app.get('/api/sku-rm-monitor', async (req, res) => {
     const onTimeRate = submittedSlots ? Math.round((onTimeSlots / submittedSlots) * 100) : 0;
     const passRate = (totalAvailable + totalOOS) ? Math.round((totalAvailable / (totalAvailable+totalOOS)) * 100) : 0;
 
-    // Category breakdown (RICE/EGGS/POULTRY/MEAT/SUGAR)
+    // Category breakdown (RICE/EGGS/POULTRY/MEAT/SUGAR) + per-store matrix
     const groupOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
     const CATS = ['RICE','EGGS','POULTRY','MEAT','SUGAR'];
     const categories = {}; CATS.forEach(c => categories[c] = { oos:0, available:0 });
+    const storeCategory = {}; // storeName -> { CAT: {oos, available, total} }
+    authorizedStores.forEach(s => { storeCategory[s.name] = {}; CATS.forEach(c => storeCategory[s.name][c] = { oos:0, available:0, total:0 }); });
     skuRows.forEach(r => {
       if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
       if (r[4] !== todayStr) return;
-      const k = (r[3]||'').trim() + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      const storeName = (r[3]||'').trim();
+      const k = storeName + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
       if (!todayLatest[k] || todayLatest[k].id !== r[1]) return;
       const g = groupOf(r[6]);
       if (!categories[g]) return;
       const st = (r[10]||'').trim();
       if (st === 'OOS') categories[g].oos++;
       else if (st === 'Available') categories[g].available++;
+      if (storeCategory[storeName] && storeCategory[storeName][g]) {
+        storeCategory[storeName][g].total++;
+        if (st === 'OOS') storeCategory[storeName][g].oos++;
+        else if (st === 'Available') storeCategory[storeName][g].available++;
+      }
     });
 
     // 14-day trend of OOS + submission count
@@ -1416,8 +1424,75 @@ app.get('/api/sku-rm-monitor', async (req, res) => {
 
     res.json({ ok:true, date: todayStr,
       kpis: { totalStores, expectedSlots, submittedSlots, onTimeSlots, lateSlots, totalOOS, totalAvailable, complianceRate, onTimeRate, passRate },
-      storeStats, categories, trend
+      storeStats, categories, storeCategory, trend
     });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+// Detail SKU explorer — filterable per-row data for RM/AM drilldown
+app.get('/api/sku-detail', async (req, res) => {
+  try {
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const catFilter = (req.query.category || '').trim().toUpperCase();
+    const storeFilter = (req.query.store || '').trim().toLowerCase();
+    const statusFilter = (req.query.status || '').trim(); // 'OOS' | 'Available' | '' (all)
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) {}
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
+
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const scopeIds = new Set();
+    stores.forEach(r => {
+      const remarks = String(r[6]||'').trim().toLowerCase();
+      if (remarks !== 'all' && remarks !== 'focus5sku') return;
+      if (assignedKeys.size) {
+        const nk = normKey(r[4]), ik = normKey(r[3]);
+        if (!(assignedKeys.has(nk) || assignedKeys.has(ik))) return;
+      }
+      scopeIds.add((r[4]||'').trim().toLowerCase());
+    });
+
+    const groupOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
+    // Pick latest ReportID per (store, date, slot)
+    const latest = {};
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4]; if (!d) return;
+      if (from && d < from) return;
+      if (to && d > to) return;
+      const storeLc = (r[3]||'').trim().toLowerCase();
+      if (!scopeIds.has(storeLc)) return;
+      if (storeFilter && storeLc !== storeFilter) return;
+      const k = storeLc + '||' + d + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!latest[k] || r[1] > latest[k]) latest[k] = r[1];
+    });
+    const entries = [];
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4]; if (!d) return;
+      if (from && d < from) return;
+      if (to && d > to) return;
+      const storeLc = (r[3]||'').trim().toLowerCase();
+      if (!scopeIds.has(storeLc)) return;
+      if (storeFilter && storeLc !== storeFilter) return;
+      const slot = ((r[5]||'AM')+'').trim().toUpperCase();
+      const k = storeLc + '||' + d + '||' + slot;
+      if (latest[k] !== r[1]) return;
+      const grp = groupOf(r[6]);
+      if (catFilter && grp !== catFilter) return;
+      const st = (r[10]||'').trim();
+      if (statusFilter && st !== statusFilter) return;
+      entries.push({
+        date: d, slot, store: (r[3]||'').trim(), group: grp, category: r[6]||'',
+        rank: parseInt(r[7])||0, sku: r[8]||'', description: r[9]||'',
+        status: st, remarks: r[11]||'', submittedBy: (r[2]||'').trim(), timestamp: r[0]||''
+      });
+    });
+    entries.sort((a,b) => b.date.localeCompare(a.date) || a.store.localeCompare(b.store) || a.group.localeCompare(b.group) || a.rank - b.rank);
+    res.json({ ok:true, entries });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -1700,9 +1775,9 @@ app.get('/Focus5_icon.png', (req, res) => {
 
 app.get('/manifest.json', (req, res) => {
   res.json({
-    name: 'Fresh Focus 5 Checklist',
-    short_name: 'Focus 5',
-    description: 'Fresh Focus 5 Checklist - Stock, SKU and Compliance monitoring',
+    name: 'Fresh Focus 5 Checklist Ver.2.0',
+    short_name: 'Focus 5 v2',
+    description: 'Fresh Focus 5 Checklist Ver.2.0 - Stock, SKU and Compliance monitoring',
     start_url: '/',
     scope: '/',
     display: 'standalone',
@@ -1741,7 +1816,7 @@ const HTML = `<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<title>Fresh Focus 5 - Checklist</title>
+<title>Fresh Focus 5 Checklist Ver.2.0</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/png" href="/Focus5_icon.png">
 <link rel="apple-touch-icon" href="/Focus5_icon.png">
@@ -1854,7 +1929,7 @@ button.sm{padding:8px 12px;font-size:13px;min-height:36px}
 </style></head><body>
 
 <header>
-  <h1>Fresh Focus 5 - Checklist</h1>
+  <h1>Fresh Focus 5 Checklist Ver.2.0</h1>
   <div class="who"><span id="whoName"></span> <button id="logoutBtn" class="sm ghost hidden">Logout</button></div>
 </header>
 
@@ -4555,12 +4630,16 @@ async function loadStockTabRM(){
       </div>\`;
     }).join('');
     amReviewCard = \`<div class="card">
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
-        <h3 style="margin:0;color:#1f7a3a">AM Review Dashboard</h3>
-        <span style="background:\${cRate===100?DARK:OOS};color:#fff;padding:4px 12px;border-radius:12px;font-weight:800;font-size:13px">\${cRate}% done</span>
-        <span class="muted" style="font-size:12px">\${totDn}/\${totExp} reviews &middot; \${totLt} late</span>
-      </div>
-      \${amRows || '<div class="muted">No Area Managers assigned yet.</div>'}
+      <details>
+        <summary style="cursor:pointer;list-style:none;outline:none">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 style="margin:0;color:#1f7a3a;display:inline">&#9662; AM Review Dashboard</h3>
+            <span style="background:\${cRate===100?DARK:(cRate>=50?AMBER:OOS)};color:#fff;padding:3px 10px;border-radius:10px;font-weight:800;font-size:12px">\${cRate}% done</span>
+            <span class="muted" style="font-size:12px">\${totDn}/\${totExp} reviews &middot; \${totLt} late &middot; click to expand per-AM detail</span>
+          </div>
+        </summary>
+        <div style="margin-top:10px">\${amRows || '<div class="muted">No Area Managers assigned yet.</div>'}</div>
+      </details>
     </div>\`;
   }
 
@@ -4629,7 +4708,93 @@ async function loadStockTabRM(){
     \${latesHTML}
   </div>\`;
 
-  out.innerHTML = kpiRow + amReviewCard + catCard + trendCard + gridCard + latesCard;
+  // Store × Category OOS matrix (today)
+  const sc = rmRes.storeCategory || {};
+  const storesWithData = rmRes.storeStats.filter(s => s.am.submitted || s.pm.submitted).map(s => s.store);
+  const matrixHeader = '<tr style="background:#eef"><th style="padding:6px 8px;text-align:left;position:sticky;left:0;background:#eef;z-index:2">Store</th>' + CATS.map(c => '<th style="padding:6px 4px;text-align:center;font-size:11px">'+c.i+' '+c.n+'</th>').join('') + '<th style="padding:6px 8px;text-align:center;background:#ffe8e8">Total OOS</th></tr>';
+  const matrixCell = (b) => {
+    if (!b || !b.total) return '<td style="padding:4px;text-align:center;color:#bbb;font-size:11px">&mdash;</td>';
+    if (b.oos === 0) return '<td style="padding:4px;text-align:center;background:#e8f5ec;color:#1f7a3a;font-weight:700;font-size:11px" title="All '+b.total+' available">0 / '+b.total+'</td>';
+    const bg = b.oos >= 5 ? OOS : AMBER;
+    return '<td style="padding:4px;text-align:center;background:'+bg+';color:#fff;font-weight:700;font-size:11px" title="'+b.oos+' OOS of '+b.total+'">'+b.oos+' / '+b.total+'</td>';
+  };
+  const matrixRows = storesWithData.length ? storesWithData.map(st => {
+    const row = sc[st] || {};
+    const totalOOS = CATS.reduce((n,c) => n + ((row[c.n]||{}).oos || 0), 0);
+    const totalBg = totalOOS === 0 ? '#e8f5ec' : totalOOS >= 10 ? OOS : AMBER;
+    const totalColor = totalOOS === 0 ? DARK : '#fff';
+    return '<tr><td style="padding:4px 8px;font-weight:600;font-size:12px;position:sticky;left:0;background:#fff;border-right:1px solid #eee">'+escapeHtml(st)+'</td>' + CATS.map(c => matrixCell(row[c.n])).join('') + '<td style="padding:4px 8px;text-align:center;background:'+totalBg+';color:'+totalColor+';font-weight:800;font-size:12px">'+totalOOS+'</td></tr>';
+  }).join('') : '<tr><td colspan="'+(CATS.length+2)+'" style="padding:12px;text-align:center;color:#789">No submissions yet today.</td></tr>';
+  const matrixCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">Store &times; Category - OOS Count (Today)</h3>
+    <div style="font-size:11px;color:#789;margin-bottom:8px">Each cell shows OOS / Total for that store+category. Red = 5+ OOS, Amber = 1-4 OOS, Green = all available, &mdash; = no data.</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:600px">
+      <thead>\${matrixHeader}</thead>
+      <tbody>\${matrixRows}</tbody>
+    </table></div>
+  </div>\`;
+
+  // Detail Explorer card with filters
+  const todayDate = todayStr();
+  const storeOptions = rmRes.storeStats.map(s => '<option value="'+escapeHtml(s.store)+'">'+escapeHtml(s.store)+'</option>').join('');
+  const catOptions = CATS.map(c => '<option value="'+c.n+'">'+c.n+'</option>').join('');
+  const detailCard = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">SKU Detail Explorer</h3>
+    <div style="font-size:11px;color:#789;margin-bottom:10px">Filter by date range, store, category, and status. Shows the latest submission per store/slot/day.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="dxFrom" type="date" value="\${todayDate}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="dxTo" type="date" value="\${todayDate}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">Store</label><select id="dxStore" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${storeOptions}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Category</label><select id="dxCat" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${catOptions}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Status</label><select id="dxStatus" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="OOS" selected>OOS only</option><option value="Available">Available only</option><option value="">All</option></select></div>
+      <button id="dxApply" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+      <button id="dxExport" style="padding:7px 14px;background:#345;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Export Excel</button>
+    </div>
+    <div id="dxOut" style="margin-top:4px"></div>
+  </div>\`;
+
+  out.innerHTML = kpiRow + amReviewCard + matrixCard + catCard + trendCard + gridCard + latesCard + detailCard;
+
+  // Wire up detail explorer
+  const dxAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
+  async function runDetail(){
+    const dxOut = $('#dxOut');
+    dxOut.innerHTML = '<div class="muted" style="padding:12px">Loading...</div>';
+    const qs = 'from=' + encodeURIComponent($('#dxFrom').value||'') + '&to=' + encodeURIComponent($('#dxTo').value||'')
+      + '&store=' + encodeURIComponent($('#dxStore').value||'') + '&category=' + encodeURIComponent($('#dxCat').value||'')
+      + '&status=' + encodeURIComponent($('#dxStatus').value||'') + '&assigned=' + encodeURIComponent(JSON.stringify(dxAssigned||[]));
+    const r = await api('/api/sku-detail?' + qs);
+    if (!r.ok) { dxOut.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    window._dxEntries = r.entries || [];
+    if (!r.entries.length) { dxOut.innerHTML = '<div class="muted" style="padding:12px">No rows match the filters.</div>'; return; }
+    const rows = r.entries.map(e => {
+      const stBg = e.status === 'OOS' ? OOS : DARK;
+      return '<tr>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px;color:#789">'+escapeHtml(e.date)+' '+e.slot+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-weight:600;font-size:12px">'+escapeHtml(e.store)+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px">'+escapeHtml(e.group)+(e.category&&e.category!==e.group?' <span style="color:#789">('+escapeHtml(e.category)+')</span>':'')+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-weight:600;font-size:12px;text-align:center">'+e.rank+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">'+escapeHtml(e.sku)+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:12px">'+escapeHtml(e.description)+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:center"><span style="background:'+stBg+';color:#fff;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700">'+escapeHtml(e.status||'-')+'</span></td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px;color:#789">'+escapeHtml(nameOf(e.submittedBy))+'</td>'
+        + '<td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px">'+escapeHtml(e.remarks||'')+'</td>'
+        + '</tr>';
+    }).join('');
+    dxOut.innerHTML = '<div style="font-size:11px;color:#789;margin-bottom:4px"><b>'+r.entries.length+'</b> rows</div>'
+      + '<div style="overflow-x:auto;max-height:500px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef;position:sticky;top:0"><th style="padding:6px;text-align:left">Date/Slot</th><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Category</th><th style="padding:6px;text-align:center">Rank</th><th style="padding:6px;text-align:left">SKU</th><th style="padding:6px;text-align:left">Description</th><th style="padding:6px;text-align:center">Status</th><th style="padding:6px;text-align:left">Submitted By</th><th style="padding:6px;text-align:left">Remarks</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }
+  $('#dxApply').onclick = runDetail;
+  $('#dxExport').onclick = () => {
+    const e = window._dxEntries || [];
+    if (!e.length) { alert('Apply filters first — nothing to export.'); return; }
+    const header = ['Date','Slot','Store','Category Group','Category','Rank','SKU','Description','Status','Submitted By','Timestamp','Remarks'];
+    const esc = v => '"' + String(v||'').replace(/"/g,'""') + '"';
+    const csv = [header.map(esc).join(',')].concat(e.map(r => [r.date,r.slot,r.store,r.group,r.category,r.rank,r.sku,r.description,r.status,nameOf(r.submittedBy),r.timestamp,r.remarks].map(esc).join(','))).join('\\r\\n');
+    const blob = new Blob(['\\ufeff'+csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'SKU_Detail_'+todayStr()+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+  };
+  runDetail();
 }
 
 // ---- Stock Review (Area Manager) ----
@@ -4698,7 +4863,77 @@ function renderReviewTab(){
   const amSection = renderSection('AM Slot Reviews', 'AM', 11, amItems, amDeadlinePassed);
   const pmSection = renderSection('PM Slot Reviews', 'PM', 16, pmItems, pmDeadlinePassed);
 
-  out.innerHTML = headerCard + amSection + pmSection;
+  // --- Store × Category OOS matrix (today, from review items) ---
+  const DARK_M='#1f7a3a', OOS_M='#c33', AMBER_M='#e0a020';
+  const CATS_M = [{n:'RICE',i:'&#127834;'},{n:'EGGS',i:'&#129370;'},{n:'POULTRY',i:'&#128020;'},{n:'MEAT',i:'&#129385;'},{n:'SUGAR',i:'&#129474;'}];
+  const grpOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
+  const storeCat = {};
+  items.forEach(x => {
+    if (!x.skuSubmitted) return;
+    storeCat[x.store] = storeCat[x.store] || {};
+    CATS_M.forEach(c => { storeCat[x.store][c.n] = storeCat[x.store][c.n] || { oos:0, total:0 }; });
+    (x.oosList||[]).forEach(o => {
+      const g = grpOf(o.category);
+      if (storeCat[x.store][g]) { storeCat[x.store][g].oos++; storeCat[x.store][g].total++; }
+    });
+    // We don't have available-count per category from review-pending, but we have slot totals.
+    // Add remainder as totals under 'MEAT' as a rough bucket is wrong — leave totals as OOS count only for simplicity.
+  });
+  const matrixCell = (b) => {
+    if (!b || !b.oos) return '<td style="padding:4px;text-align:center;color:#1f7a3a;font-weight:700;font-size:11px;background:#e8f5ec">0</td>';
+    const bg = b.oos >= 5 ? OOS_M : AMBER_M;
+    return '<td style="padding:4px;text-align:center;background:'+bg+';color:#fff;font-weight:700;font-size:11px">'+b.oos+'</td>';
+  };
+  const storesWithData_AM = Object.keys(storeCat);
+  const matrixHeader_AM = '<tr style="background:#eef"><th style="padding:6px 8px;text-align:left">Store</th>' + CATS_M.map(c => '<th style="padding:6px 4px;text-align:center;font-size:11px">'+c.i+' '+c.n+'</th>').join('') + '<th style="padding:6px 8px;text-align:center;background:#ffe8e8">Total OOS</th></tr>';
+  const matrixRows_AM = storesWithData_AM.length ? storesWithData_AM.map(st => {
+    const row = storeCat[st] || {};
+    const tot = CATS_M.reduce((n,c) => n + ((row[c.n]||{}).oos || 0), 0);
+    const totalBg = tot === 0 ? '#e8f5ec' : tot >= 10 ? OOS_M : AMBER_M;
+    const totalColor = tot === 0 ? DARK_M : '#fff';
+    return '<tr><td style="padding:4px 8px;font-weight:600;font-size:12px">'+escapeHtml(st)+'</td>' + CATS_M.map(c => matrixCell(row[c.n])).join('') + '<td style="padding:4px 8px;text-align:center;background:'+totalBg+';color:'+totalColor+';font-weight:800;font-size:12px">'+tot+'</td></tr>';
+  }).join('') : '<tr><td colspan="'+(CATS_M.length+2)+'" style="padding:12px;text-align:center;color:#789">No submissions in your stores yet today.</td></tr>';
+  const matrixCard_AM = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">Store &times; Category - OOS Count (Today, your stores)</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>\${matrixHeader_AM}</thead><tbody>\${matrixRows_AM}</tbody></table></div>
+  </div>\`;
+
+  // --- Detail Explorer with filters (scoped to AM's stores) ---
+  const todayDate_AM = todayStr();
+  const storeOpts_AM = [...new Set(items.map(x => x.store))].map(s => '<option value="'+escapeHtml(s)+'">'+escapeHtml(s)+'</option>').join('');
+  const catOpts_AM = CATS_M.map(c => '<option value="'+c.n+'">'+c.n+'</option>').join('');
+  const detailCard_AM = \`<div class="card">
+    <h3 style="margin:0 0 8px;color:#1f7a3a">SKU Detail Explorer (your stores)</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="axFrom" type="date" value="\${todayDate_AM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="axTo" type="date" value="\${todayDate_AM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">Store</label><select id="axStore" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${storeOpts_AM}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Category</label><select id="axCat" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${catOpts_AM}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Status</label><select id="axStatus" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="OOS" selected>OOS only</option><option value="Available">Available only</option><option value="">All</option></select></div>
+      <button id="axApply" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+    </div>
+    <div id="axOut"></div>
+  </div>\`;
+
+  out.innerHTML = headerCard + amSection + pmSection + matrixCard_AM + detailCard_AM;
+
+  async function runAxDetail(){
+    const o = $('#axOut'); o.innerHTML = '<div class="muted" style="padding:10px">Loading...</div>';
+    const qs = 'from=' + encodeURIComponent($('#axFrom').value||'') + '&to=' + encodeURIComponent($('#axTo').value||'')
+      + '&store=' + encodeURIComponent($('#axStore').value||'') + '&category=' + encodeURIComponent($('#axCat').value||'')
+      + '&status=' + encodeURIComponent($('#axStatus').value||'') + '&assigned=' + encodeURIComponent(JSON.stringify(S.assignedStores||[]));
+    const r = await api('/api/sku-detail?' + qs);
+    if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    if (!r.entries.length) { o.innerHTML = '<div class="muted" style="padding:10px">No rows match.</div>'; return; }
+    const rows = r.entries.map(e => {
+      const stBg = e.status === 'OOS' ? OOS_M : DARK_M;
+      return '<tr><td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px;color:#789">'+escapeHtml(e.date)+' '+e.slot+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-weight:600;font-size:12px">'+escapeHtml(e.store)+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px">'+escapeHtml(e.group)+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-weight:600;text-align:center">'+e.rank+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">'+escapeHtml(e.sku)+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:12px">'+escapeHtml(e.description)+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;text-align:center"><span style="background:'+stBg+';color:#fff;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700">'+escapeHtml(e.status||'-')+'</span></td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px;color:#789">'+escapeHtml(nameOf(e.submittedBy))+'</td><td style="padding:4px 6px;border-bottom:1px solid #eee;font-size:11px">'+escapeHtml(e.remarks||'')+'</td></tr>';
+    }).join('');
+    o.innerHTML = '<div style="font-size:11px;color:#789;margin-bottom:4px"><b>'+r.entries.length+'</b> rows</div><div style="overflow-x:auto;max-height:500px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef;position:sticky;top:0"><th style="padding:6px;text-align:left">Date/Slot</th><th style="padding:6px;text-align:left">Store</th><th style="padding:6px;text-align:left">Category</th><th style="padding:6px;text-align:center">Rank</th><th style="padding:6px;text-align:left">SKU</th><th style="padding:6px;text-align:left">Description</th><th style="padding:6px;text-align:center">Status</th><th style="padding:6px;text-align:left">Submitted By</th><th style="padding:6px;text-align:left">Remarks</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }
+  $('#axApply').onclick = runAxDetail;
+  runAxDetail();
+
   document.querySelectorAll('[data-review-store]').forEach(b => b.onclick = () => doReview(b.dataset.reviewStore, b.dataset.reviewSlot));
   document.querySelectorAll('[data-rv-toggle]').forEach(b => b.onclick = () => toggleRvExpand(b.dataset.rvToggle, b.dataset.rvSlot));
   document.querySelectorAll('[data-rv-sku]').forEach(cb => cb.onchange = () => toggleRvSku(cb.dataset.rvStore, cb.dataset.rvSlot2, cb.dataset.rvSku));

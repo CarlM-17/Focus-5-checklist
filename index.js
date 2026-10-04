@@ -345,6 +345,27 @@ app.post('/api/reject-account', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+app.post('/api/edit-stores', async (req, res) => {
+  try {
+    const check = await requireRegional(req);
+    if (!check.ok) return res.json(check);
+    const { email, assignedStores } = req.body || {};
+    if (!email) return res.json({ ok:false, error:'email required' });
+    if (!Array.isArray(assignedStores)) return res.json({ ok:false, error:'assignedStores must be an array' });
+    const idx = check.rows.findIndex(r => (r[0]||'').trim().toLowerCase() === String(email).trim().toLowerCase());
+    if (idx === -1) return res.json({ ok:false, error:'Account not found' });
+    const level = (check.rows[idx][3] || '').trim();
+    if (level === 'Regional Manager') return res.json({ ok:false, error:'Regional Managers see all areas; no store list to edit' });
+    if (level === 'Store Manager' && assignedStores.length !== 1) return res.json({ ok:false, error:'Store Managers must have exactly one store' });
+    if (level === 'Area Manager' && !assignedStores.length) return res.json({ ok:false, error:'Area Managers must have at least one store' });
+    const rowNum = idx + 2;
+    await sheetsBatchUpdateValues([
+      { range: 'UserAccounts!J' + rowNum, values: [[JSON.stringify(assignedStores)]] }
+    ]);
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.post('/api/reset-password', async (req, res) => {
   try {
     const check = await requireRegional(req);
@@ -5223,7 +5244,10 @@ async function loadUserApprovalsTab(){
     <td style="padding:6px 8px;border:1px solid #eee">\${escapeHtml(a.level||'')}</td>
     <td style="padding:6px 8px;border:1px solid #eee">\${storesText(a)}</td>
     <td style="padding:6px;border:1px solid #eee;font-size:11px;color:#789">\${a.approvedAt?new Date(a.approvedAt).toLocaleString():''}<br>by \${escapeHtml(a.approvedBy||'')}</td>
-    <td style="padding:6px;border:1px solid #eee"><button class="ua-reset" data-email="\${escapeHtml(a.email)}" style="background:#345;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Reset Password</button></td>
+    <td style="padding:6px;border:1px solid #eee;white-space:nowrap">
+      \${a.level!=='Regional Manager' ? '<button class="ua-edit" data-email="'+escapeHtml(a.email)+'" data-level="'+escapeHtml(a.level||'')+'" data-stores="'+escapeHtml(JSON.stringify(a.assignedStores||[]))+'" style="background:#1f7a3a;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px;margin-right:4px">Edit Stores</button>' : ''}
+      <button class="ua-reset" data-email="\${escapeHtml(a.email)}" style="background:#345;color:#fff;border:0;padding:6px 10px;border-radius:4px;font-weight:600;cursor:pointer;font-size:11px">Reset Password</button>
+    </td>
   </tr>\`).join('');
 
   const rejRows = rejected.map(a => \`<tr style="background:#fff5f5">
@@ -5274,6 +5298,48 @@ async function loadUserApprovalsTab(){
     if (!r.ok) { alert(r.error||'Failed'); return; }
     alert('Password reset done. Share the new password with ' + email);
   });
+  document.querySelectorAll('.ua-edit').forEach(b => b.onclick = async () => {
+    const email = b.dataset.email;
+    const level = b.dataset.level;
+    let current = []; try { current = JSON.parse(b.dataset.stores || '[]'); } catch(_) {}
+    const stRes = await api('/api/stores?level=regional%20manager&manager=');
+    const allStores = (stRes.stores || []).map(s => typeof s === 'string' ? { name:s, area:'' } : s);
+    const curSet = new Set(current.map(s => String(s).trim().toLowerCase()));
+    openEditStoresModal({ email, level, allStores, curSet });
+  });
+}
+
+function openEditStoresModal({ email, level, allStores, curSet }){
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px';
+  const isSM = level === 'Store Manager';
+  const items = allStores.map((s, i) => \`<label style="display:block;padding:6px 4px;font-size:13px;cursor:pointer;border-bottom:1px solid #f0f0f0">
+    <input type="\${isSM?'radio':'checkbox'}" name="es-store" class="es-store-chk" value="\${escapeHtml(s.name)}" \${curSet.has(s.name.toLowerCase())?'checked':''} style="margin-right:8px"/>
+    <b>\${escapeHtml(s.name)}</b>\${s.area?' <span style="color:#789;font-size:11px">('+escapeHtml(s.area)+')</span>':''}
+  </label>\`).join('');
+  overlay.innerHTML = \`<div style="background:#fff;border-radius:10px;max-width:520px;width:100%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 10px 30px rgba(0,0,0,.3)">
+    <div style="padding:14px 18px;background:#1f7a3a;color:#fff;border-radius:10px 10px 0 0">
+      <h3 style="margin:0;font-size:16px">Edit Assigned Stores</h3>
+      <div style="font-size:12px;opacity:.9;margin-top:2px">\${escapeHtml(email)} - \${escapeHtml(level)} \${isSM?'(select ONE)':'(select one or more)'}</div>
+    </div>
+    <div style="padding:12px 18px;overflow-y:auto;flex:1">\${items||'<div class="muted">No stores available.</div>'}</div>
+    <div style="padding:12px 18px;border-top:1px solid #eee;display:flex;gap:8px;justify-content:flex-end">
+      <button id="esCancel" style="background:#eee;color:#333;border:0;padding:8px 16px;border-radius:6px;font-weight:600;cursor:pointer">Cancel</button>
+      <button id="esSave" style="background:#1f7a3a;color:#fff;border:0;padding:8px 16px;border-radius:6px;font-weight:600;cursor:pointer">Save</button>
+    </div>
+  </div>\`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#esCancel').onclick = () => overlay.remove();
+  overlay.querySelector('#esSave').onclick = async () => {
+    const picked = [...overlay.querySelectorAll('.es-store-chk:checked')].map(c => c.value);
+    if (!picked.length) { alert('Pick at least one store'); return; }
+    if (isSM && picked.length !== 1) { alert('Store Managers must have exactly one store'); return; }
+    const r = await api('/api/edit-stores', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requesterEmail:S.email, requesterUsername:S.manager, email, assignedStores:picked })});
+    if (!r.ok) { alert(r.error||'Failed'); return; }
+    overlay.remove();
+    alert('Stores updated. User must log out and log back in for change to take effect.');
+    loadUserApprovalsTab();
+  };
 }
 
 // Auto-login if remembered

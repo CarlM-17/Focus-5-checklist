@@ -768,9 +768,20 @@ app.get('/api/store-checks-monitor', async (req, res) => {
 
     let assignedList = [];
     try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) { assignedList = []; }
-    const assignedSet = new Set(assignedList.map(s => String(s||'').trim().toLowerCase()).filter(Boolean));
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
 
     const stores = await sheetsGet('ListOfStores!A2:G');
+    // Resolve assigned names/ids → canonical store NAMES (tolerant of case/space/punct)
+    const assignedSet = new Set(); // normalized lowercase names of my stores
+    if (assignedKeys.size) {
+      stores.forEach(r => {
+        const nameKey = normKey(r[4]), idKey = normKey(r[3]);
+        if ((nameKey && assignedKeys.has(nameKey)) || (idKey && assignedKeys.has(idKey))) {
+          assignedSet.add(String(r[4]||'').trim().toLowerCase());
+        }
+      });
+    }
     const storeMap = {};
     const managerAreas = new Set();
     stores.forEach((r) => {
@@ -1444,12 +1455,32 @@ app.get('/api/review-pending', async (req, res) => {
     const date = (req.query.date || '').trim();
     if (!manager || !date) return res.json({ ok:false, error:'manager and date required' });
 
-    // AM's assigned stores
+    // AM's assigned stores — accept from signup (UserAccounts.assignedStores) and/or legacy ListOfStores col G
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) { assignedList = []; }
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
     const stores = await sheetsGet('ListOfStores!A2:G');
+    // Build id→(name,area) and resolve assigned names/ids → canonical store IDs via tolerant match
+    const assignedIds = new Set();
+    if (assignedKeys.size) {
+      stores.forEach(r => {
+        const nameKey = normKey(r[4]);
+        const idKey = normKey(r[3]);
+        if ((nameKey && assignedKeys.has(nameKey)) || (idKey && assignedKeys.has(idKey))) {
+          assignedIds.add(String(r[3]||'').trim());
+        }
+      });
+    }
     const myStores = stores
-      .filter(r => (r[6] || '').trim().toLowerCase() === manager)
-      .map(r => ({ name: (r[4]||'').trim(), area: r[2] || '' }))
-      .filter(s => s.name);
+      .filter(r => {
+        const name = (r[4]||'').trim();
+        const id = String(r[3]||'').trim();
+        if (!name) return false;
+        if (assignedIds.size) return assignedIds.has(id);
+        return (r[6] || '').trim().toLowerCase() === manager;
+      })
+      .map(r => ({ name: (r[4]||'').trim(), area: r[2] || '', id: String(r[3]||'').trim() }));
 
     // Store Manager SKU Checklist for the date, grouped by (store, slot)
     const skuRows = await sheetsGet('SKUChecklistData!A2:M');
@@ -4575,7 +4606,7 @@ async function loadReviewTab(){
   out.innerHTML = '<div class="card muted">Loading reviews...</div>';
   const date = todayStr();
   const [pendingRes] = await Promise.all([
-    api('/api/review-pending?manager=' + encodeURIComponent(S.manager) + '&date=' + date)
+    api('/api/review-pending?manager=' + encodeURIComponent(S.manager) + '&date=' + date + '&assigned=' + encodeURIComponent(JSON.stringify(S.assignedStores||[])))
   ]);
   if (!pendingRes.ok) { out.innerHTML = '<div class="card err">'+escapeHtml(pendingRes.error||'Failed')+'</div>'; return; }
   REVIEW_STATE.items = pendingRes.items || [];

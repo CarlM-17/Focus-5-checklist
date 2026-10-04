@@ -853,14 +853,13 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       name, y: v.y, n: v.n, total: v.total, pass: v.total ? Math.round((v.y / v.total) * 100) : 0,
     })).sort((a, b) => a.pass - b.pass);
 
-    // Authorized store-manager stores (in scope) — used to ensure every store appears in today's log
-    const smRows = await sheetsGet('StoreManagers!A2:C');
-    const smStoreIds = new Set(smRows.map((r) => String(r[0] || '').trim()).filter(Boolean));
+    // Authorized stores for Store Check KPI: ListOfStores Remarks col G === "All"
     const authorizedStores = stores
       .filter((r) => {
         const storeName = r[4], storeId = String(r[3] || '').trim(), areaName = r[2] || '(no area)';
+        const remarks = String(r[6] || '').trim().toLowerCase();
         if (!storeName || !storeId) return false;
-        if (!smStoreIds.has(storeId)) return false;
+        if (remarks !== 'all') return false;
         if (!isRegional) {
           const inAssigned = assignedSet.has(String(storeName).trim().toLowerCase());
           if (assignedSet.size) {
@@ -1276,9 +1275,13 @@ app.get('/api/sku-rm-monitor', async (req, res) => {
     const date = (req.query.date || todayLocalPHstr()).trim();
     const todayStr = date;
 
-    // SKU Checklist scope = ALL stores in ListOfStores (not limited to StoreManagers)
+    // SKU Checklist scope = ListOfStores where Remarks col G is "All" or "Focus5SKU"
     const stores = await sheetsGet('ListOfStores!A2:G');
     const authorizedStores = stores
+      .filter(r => {
+        const remarks = String(r[6]||'').trim().toLowerCase();
+        return remarks === 'all' || remarks === 'focus5sku';
+      })
       .map(r => ({ id: String(r[3]||'').trim(), name: (r[4]||'').trim(), area: (r[2]||'').trim() }))
       .filter(s => s.name);
 
@@ -1476,9 +1479,12 @@ app.get('/api/review-pending', async (req, res) => {
       .filter(r => {
         const name = (r[4]||'').trim();
         const id = String(r[3]||'').trim();
+        const remarks = String(r[6]||'').trim().toLowerCase();
         if (!name) return false;
+        // SKU scope: Remarks must be "All" or "Focus5SKU"
+        if (remarks !== 'all' && remarks !== 'focus5sku') return false;
         if (assignedIds.size) return assignedIds.has(id);
-        return (r[6] || '').trim().toLowerCase() === manager;
+        return false;
       })
       .map(r => ({ name: (r[4]||'').trim(), area: r[2] || '', id: String(r[3]||'').trim() }));
 
@@ -2106,11 +2112,13 @@ async function doLogin(useLegacy){
   S.manager = r.manager; S.level = r.level || 'Area Manager';
   S.storeId = r.storeId || null; S.storeName = r.storeName || null;
   S.email = r.email || null; S.fullName = r.fullName || null;
+  S.assignedStores = Array.isArray(r.assignedStores) ? r.assignedStores : [];
   localStorage.setItem('ff5_mgr', r.manager);
   localStorage.setItem('ff5_lvl', S.level);
   if (S.storeId) localStorage.setItem('ff5_sid', S.storeId); else localStorage.removeItem('ff5_sid');
   if (S.storeName) localStorage.setItem('ff5_sname', S.storeName); else localStorage.removeItem('ff5_sname');
   if (S.email) localStorage.setItem('ff5_email', S.email); else localStorage.removeItem('ff5_email');
+  localStorage.setItem('ff5_assigned', JSON.stringify(S.assignedStores));
   await enterApp();
 }
 $('#loginBtn').onclick = () => doLogin(false);
@@ -5275,6 +5283,7 @@ if (remembered) {
   S.storeId = localStorage.getItem('ff5_sid') || null;
   S.storeName = localStorage.getItem('ff5_sname') || null;
   S.email = localStorage.getItem('ff5_email') || null;
+  try { S.assignedStores = JSON.parse(localStorage.getItem('ff5_assigned') || '[]'); } catch(_) { S.assignedStores = []; }
   enterApp();
 }
 </script>

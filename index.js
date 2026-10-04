@@ -235,11 +235,18 @@ app.post('/api/login-email', async (req, res) => {
     // Resolve storeName/area for Store Manager — prefer assignedStores[0], fall back to linked
     let storeId = null, storeName = null, area = null;
     if (level.toLowerCase() === 'store manager') {
-      const picked = assignedStores[0] || linked;
+      const pickedRaw = assignedStores[0] || linked || '';
+      const picked = String(pickedRaw).trim();
+      const pickedLc = picked.toLowerCase();
       if (picked) {
         const stores = await sheetsGet('ListOfStores!A2:G');
-        // Match by store name OR store ID
-        const storeRow = stores.find(r => String(r[4]||'').trim() === picked) || stores.find(r => String(r[3]||'').trim() === picked);
+        const storeRow =
+          stores.find(r => String(r[4]||'').trim().toLowerCase() === pickedLc)
+          || stores.find(r => String(r[3]||'').trim() === picked)
+          || stores.find(r => {
+              const n = String(r[4]||'').trim().toLowerCase();
+              return n && (n === pickedLc || pickedLc.startsWith(n+' ') || n.startsWith(pickedLc+' '));
+          });
         if (storeRow) { storeId = String(storeRow[3]||'').trim(); storeName = (storeRow[4] || '').trim(); area = (storeRow[2] || '').trim(); }
       }
     }
@@ -1116,11 +1123,21 @@ app.get('/api/sku-list', async (req, res) => {
     const store = (req.query.store || '').trim();
     if (!storeId && !store) return res.json({ ok:false, error:'storeId or store required' });
     const rows = await sheetsGet('Focus5SummarySKU!A2:H');
-    const filtered = rows.filter(r => {
-      // Primary: match by Store ID (col A on Focus5SummarySKU == col D on ListOfStores)
-      if (storeId && String(r[0] || '').trim() === storeId) return true;
-      return false;
-    });
+    const target = store.trim().toLowerCase();
+    let filtered = rows.filter(r => storeId && String(r[0] || '').trim() === storeId);
+    // Fallback: tolerant name match if ID yielded nothing (sheet may abbreviate name or use different code)
+    if (!filtered.length && target) {
+      filtered = rows.filter(r => {
+        const n = (r[1] || '').trim().toLowerCase();
+        if (!n) return false;
+        return n === target || target.startsWith(n + ' ') || n.startsWith(target + ' ');
+      });
+    }
+    if (!filtered.length) {
+      const idsInSheet = [...new Set(rows.map(r => String(r[0]||'').trim()).filter(Boolean))].sort().join(', ');
+      const namesInSheet = [...new Set(rows.map(r => (r[1]||'').trim()).filter(Boolean))].sort().join(', ');
+      return res.json({ ok:true, items:[], diag:{ requestedId:storeId, requestedName:store, idsInSheet, namesInSheet }});
+    }
     const items = filtered.map(r => ({
       storeCode: r[0], storeName: r[1], rank: parseInt(r[2]) || 0,
       sku: r[3], description: r[4], supplier: r[5], skuType: r[6], category: (r[7]||'').trim()
@@ -4757,7 +4774,10 @@ async function loadSKUChecklist(){
   SKU_STATE.histSlots = histEntries;
   if (!skuRes.ok){ $('#skuChkOut').innerHTML = '<div class="card err">'+escapeHtml(skuRes.error||'Failed to load SKUs')+'</div>'; return; }
   if (!skuRes.items || !skuRes.items.length){
-    $('#skuChkOut').innerHTML = '<div class="card"><div style="padding:12px;color:#c33;font-weight:bold">No SKUs found for store "'+escapeHtml(S.storeName||'')+'" in Focus5SummarySKU sheet. Contact admin.</div></div>';
+    const d = skuRes.diag || {};
+    $('#skuChkOut').innerHTML = '<div class="card"><div style="padding:12px;color:#c33;font-weight:bold">No SKUs found for store "'+escapeHtml(S.storeName||'')+'" (ID: '+escapeHtml(S.storeId||'')+') in Focus5SummarySKU sheet.</div>'
+      + (d.idsInSheet ? '<div style="padding:8px 12px;font-size:11px;color:#556;background:#f6f6f6;border-radius:6px;margin:8px 12px"><b>Store IDs in Focus5SummarySKU:</b> '+escapeHtml(d.idsInSheet)+'<br><b>Store Names in Focus5SummarySKU:</b> '+escapeHtml(d.namesInSheet)+'</div>' : '')
+      + '<div style="padding:0 12px 12px;font-size:12px;color:#789">Add a row for this store in Focus5SummarySKU, or contact admin.</div></div>';
     return;
   }
   SKU_STATE.items = skuRes.items;

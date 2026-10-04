@@ -1124,7 +1124,15 @@ app.get('/api/sku-list', async (req, res) => {
     if (!storeId && !store) return res.json({ ok:false, error:'storeId or store required' });
     const rows = await sheetsGet('Focus5SummarySKU!A2:H');
     const target = store.trim().toLowerCase();
-    let filtered = rows.filter(r => storeId && String(r[0] || '').trim() === storeId);
+    const normId = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return '';
+      // If numeric-like, strip decimals and leading zeros for comparison
+      const m = s.match(/^(\d+)(?:\.0+)?$/);
+      return m ? String(parseInt(m[1], 10)) : s;
+    };
+    const nid = normId(storeId);
+    let filtered = rows.filter(r => nid && normId(r[0]) === nid);
     // Fallback: tolerant name match if ID yielded nothing (sheet may abbreviate name or use different code)
     if (!filtered.length && target) {
       filtered = rows.filter(r => {

@@ -912,7 +912,7 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       });
       if (!perStore[s]) perStore[s] = { y: 0, n: 0, total: 0, area: areaOf(s) };
     });
-    const perStoreArr = Object.entries(perStore).map(([name, v]) => {
+    const perStoreArr = Object.entries(perStore).filter(([name]) => new Set(authorizedStores.map(s => s.toLowerCase())).has(String(name||'').toLowerCase())).map(([name, v]) => {
       const dates = dateSet[name] ? dateSet[name].size : 0;
       const slotsDone = slotSet[name] ? slotSet[name].size : 0;
       const slotCompliance = dates ? Math.round((slotsDone / (dates * 3)) * 100) : 0;
@@ -920,7 +920,8 @@ app.get('/api/store-checks-monitor', async (req, res) => {
       return { name, area: v.area, y: v.y, n: v.n, total: v.total, slotCompliance, pass, dates, slotsDone };
     }).sort((a, b) => (a.area || '').localeCompare(b.area || '') || a.name.localeCompare(b.name));
 
-    const perDay = Object.values(byStoreDate).map((d) => ({
+    const authorizedSet = new Set(authorizedStores.map(s => s.toLowerCase()));
+    const perDay = Object.values(byStoreDate).filter(d => authorizedSet.has(String(d.store||'').toLowerCase())).map((d) => ({
       store: d.store,
       area: (storeMap[d.store] || {}).area || '(unknown)',
       date: d.date,

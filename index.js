@@ -4513,40 +4513,18 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     mergeRow(r2, totalCols); setFont(r2.getCell(1), { size:10, italic:true }); r2.getCell(1).alignment = { horizontal:'center' }; r2.height = 18;
     addRow([]);
 
-    // ===== OVERALL OSA BY CATEGORY (bar) =====
-    const BAR_SEG = 20;
-    const barHdrRow = addRow(['OVERALL OSA BY CATEGORY']);
-    ws.mergeCells(barHdrRow.number, 1, barHdrRow.number, 2+BAR_SEG+1);
-    barHdrRow.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(barHdrRow.getCell(1), DARK); setAlign(barHdrRow.getCell(1), 'left');
-    barHdrRow.height = 20;
-    // sub-header: category | bar segments | % label
-    const barSubHdr = addRow(['CATEGORY'].concat(Array(BAR_SEG).fill('')).concat(['% OSA']));
-    setFill(barSubHdr.getCell(1), DARK); setFont(barSubHdr.getCell(1), { bold:true, color:{argb:WHITE} }); setAlign(barSubHdr.getCell(1));
-    setFill(barSubHdr.getCell(BAR_SEG+2), DARK); setFont(barSubHdr.getCell(BAR_SEG+2), { bold:true, color:{argb:WHITE} }); setAlign(barSubHdr.getCell(BAR_SEG+2));
-    for (let i=0; i<BAR_SEG; i++) { setFill(barSubHdr.getCell(2+i), LGREY); barSubHdr.getCell(2+i).value = ((i+1)*5); setFont(barSubHdr.getCell(2+i), { size:8, color:{argb:'FF789'} }); setAlign(barSubHdr.getCell(2+i)); }
-    CATS.forEach(cat => {
-      const b = catTotals[cat]; const p = b.total ? Math.round((b.available/b.total)*100) : null;
-      const filled = p===null ? 0 : Math.round((p/100)*BAR_SEG);
-      const barColor = bandFill(p);
-      const row = addRow([cat].concat(Array(BAR_SEG).fill('')).concat([p===null?'-':p+'%']));
-      row.height = 20;
-      setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
-      for (let i=0; i<BAR_SEG; i++) { setFill(row.getCell(2+i), i<filled ? barColor : 'FFF0F0F0'); }
-      setFill(row.getCell(BAR_SEG+2), barColor); setFont(row.getCell(BAR_SEG+2), { bold:true, color:{argb:bandFont(p)} }); setAlign(row.getCell(BAR_SEG+2));
-    });
-    addRow([]);
-
-    // ===== WEEKLY TREND BY CATEGORY (column chart) =====
+    // ===== WEEKLY TREND BY CATEGORY (with OVERALL last column) =====
     if (weeks.length) {
-      const trHdr = addRow(['WEEKLY TREND - % OSA BY CATEGORY (column chart)']);
-      ws.mergeCells(trHdr.number, 1, trHdr.number, weeks.length+1);
+      const trHdr = addRow(['WEEKLY TREND - % OSA BY CATEGORY']);
+      ws.mergeCells(trHdr.number, 1, trHdr.number, weeks.length+2);
       trHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(trHdr.getCell(1), DARK); setAlign(trHdr.getCell(1), 'left');
       trHdr.height = 20;
-      const colHdr = addRow(['CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))));
+      const colHdr = addRow(['CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))).concat(['OVERALL']));
       setFill(colHdr.getCell(1), DARK); setFont(colHdr.getCell(1), { bold:true, color:{argb:WHITE} }); setAlign(colHdr.getCell(1));
       weeks.forEach((w,i) => { const c = colHdr.getCell(i+2); setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); });
-      const rangeHdr = addRow([''].concat(weeks.map(w=>weekRange(w))));
-      weeks.forEach((w,i) => { const c = rangeHdr.getCell(i+2); setFont(c, { size:9, italic:true, color:{argb:'FF789'} }); setAlign(c); });
+      const overallHdrCell = colHdr.getCell(weeks.length+2); setFill(overallHdrCell, DARK); setFont(overallHdrCell, { bold:true, color:{argb:WHITE} }); setAlign(overallHdrCell);
+      const rangeHdr = addRow([''].concat(weeks.map(w=>weekRange(w))).concat(['']));
+      weeks.forEach((w,i) => { const c = rangeHdr.getCell(i+2); setFont(c, { size:9, italic:true, color:{argb:WHITE} }); setFill(c, LIGHT); setAlign(c); });
       // Compute weekly avg per cat
       CATS.forEach(cat => {
         const vals = weeks.map((w,wi) => {
@@ -4557,10 +4535,13 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
           });
           return den ? Math.round(num/den) : null;
         });
-        const row = addRow([cat].concat(vals.map(v => v===null ? '-' : v+'%')));
+        const valid = vals.filter(v => v !== null);
+        const overall = valid.length ? Math.round(valid.reduce((n,v)=>n+v,0)/valid.length) : null;
+        const row = addRow([cat].concat(vals.map(v => v===null ? '-' : v+'%')).concat([overall===null?'-':overall+'%']));
         row.height = 22;
         setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
         vals.forEach((v,i) => { const c = row.getCell(i+2); setFill(c, bandFill(v)); setFont(c, { bold:true, color:{argb:bandFont(v)} }); setAlign(c); });
+        const oc = row.getCell(weeks.length+2); setFill(oc, bandFill(overall)); setFont(oc, { bold:true, color:{argb:bandFont(overall)}, size:12 }); setAlign(oc);
       });
       addRow([]);
     }
@@ -4570,7 +4551,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     ws.mergeCells(wsHdr.number, 1, wsHdr.number, weeks.length+3);
     wsHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(wsHdr.getCell(1), DARK); setAlign(wsHdr.getCell(1), 'left');
     wsHdr.height = 20;
-    const sumHdr = addRow(['STORE','CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))).concat(['AVG']));
+    const sumHdr = addRow(['STORE','CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))).concat(['OVERALL']));
     sumHdr.eachCell((c, idx) => {
       const isWeek = idx > 2 && idx <= 2+weeks.length;
       setFill(c, isWeek ? LIGHT : DARK); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c);
@@ -4597,29 +4578,6 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
       ws.getCell(storeStart, 1).alignment = { horizontal:'left', vertical:'middle', wrapText:true };
     });
     addRow([]);
-
-    // ===== PER-STORE OVERALL OSA (ranked bar) =====
-    if (sliceNames.length) {
-      const psHdr = addRow(['PER-STORE OVERALL OSA (ranked)']);
-      ws.mergeCells(psHdr.number, 1, psHdr.number, 2+BAR_SEG+1);
-      psHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(psHdr.getCell(1), DARK); setAlign(psHdr.getCell(1), 'left');
-      psHdr.height = 20;
-      const storeTotals = sliceNames.map(sl => {
-        let num=0, den=0;
-        CATS.forEach(cat => { const m = (bySliceCat[sl]||{})[cat]; if (m && m.avg !== null) { num += m.avg; den++; } });
-        return { store: sl, pct: den ? Math.round(num/den) : null };
-      }).sort((a,b) => (b.pct||0) - (a.pct||0));
-      storeTotals.forEach(t => {
-        const filled = t.pct===null ? 0 : Math.round((t.pct/100)*BAR_SEG);
-        const bc = bandFill(t.pct);
-        const row = addRow([t.store].concat(Array(BAR_SEG).fill('')).concat([t.pct===null?'-':t.pct+'%']));
-        row.height = 20;
-        setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
-        for (let i=0; i<BAR_SEG; i++) setFill(row.getCell(2+i), i<filled ? bc : 'FFF0F0F0');
-        setFill(row.getCell(BAR_SEG+2), bc); setFont(row.getCell(BAR_SEG+2), { bold:true, color:{argb:bandFont(t.pct)} }); setAlign(row.getCell(BAR_SEG+2));
-      });
-      addRow([]);
-    }
 
     // ===== PER-STORE DETAIL (collapsible by category via outlineLevel) =====
     const detHdr = addRow(['PER STORE MONITORING - DETAILED SKU DATA (click +/- in the left margin to expand per store/category)']);

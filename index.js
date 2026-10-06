@@ -1938,6 +1938,7 @@ const HTML = `<!doctype html>
 <meta name="apple-mobile-web-app-title" content="Focus 5">
 <meta name="application-name" content="Focus 5">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:rgba(0,0,0,0)}
 html,body{overscroll-behavior-y:contain}
@@ -4441,6 +4442,7 @@ function buildFlaggedOverviewHTML(data, flagged, wReports, opts){
 // ---- OSA Monitoring Excel Export (combined Per-Store + Weekly Summary) ----
 async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
   if (!from || !to) { alert('Set From and To dates first.'); return; }
+  if (typeof ExcelJS === 'undefined') { alert('Excel library still loading. Please wait a moment and try again.'); return; }
   const btnTxt = 'Preparing Excel... please wait';
   const btns = document.querySelectorAll('[id^="osaExport"]'); btns.forEach(b => { b.disabled = true; b.dataset.orig = b.textContent; b.textContent = btnTxt; });
   try {
@@ -4452,10 +4454,10 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     ]);
     if (!detRes.ok) { alert('Detail fetch failed: '+(detRes.error||'')); return; }
     if (!availRes.ok) { alert('Availability fetch failed: '+(availRes.error||'')); return; }
-    const DARK = '#1f7a3a', LIGHT = '#8bc34a', YELLOW = '#fff59d', AMBER='#e0a020', RED='#c33';
-    const cellBg = (p) => p===null?'#f2f2f2':(p>=95?DARK:p>=85?LIGHT:p>=70?AMBER:RED);
-    const cellColor = (p) => (p===null)?'#999':'#fff';
-    const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    // ExcelJS hex colors (ARGB — no #)
+    const DARK = 'FF1F7A3A', LIGHT = 'FF8BC34A', YELLOW = 'FFFFF59D', AMBER='FFE0A020', RED='FFC33333', WHITE='FFFFFFFF', GREY='FFF2F2F2', LGREY='FFE8E8E8', TITLEBG='FF1F7A3A';
+    const bandFill = (p) => p===null?GREY:(p>=95?DARK:p>=85?LIGHT:p>=70?AMBER:RED);
+    const bandFont = (p) => p===null?'FF999999':WHITE;
     const monthLbl = (() => { const d1=new Date(from+'T00:00:00'), d2=new Date(to+'T00:00:00'); const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (d1.getMonth()===d2.getMonth()&&d1.getFullYear()===d2.getFullYear())? M[d1.getMonth()]+' '+d1.getFullYear() : M[d1.getMonth()]+' '+d1.getDate()+' - '+M[d2.getMonth()]+' '+d2.getDate()+', '+d2.getFullYear(); })();
     const weekRange = (w) => { const mon=new Date(w+'T00:00:00'); const sun=new Date(mon); sun.setDate(mon.getDate()+6); const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return mon.getMonth()===sun.getMonth()?M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate():M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate(); };
 
@@ -4467,28 +4469,11 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     const sliceNames = Object.keys(bySliceCat).sort();
     const CATS = ['POULTRY','EGGS','MEAT','RICE','SUGAR'];
 
-    // Weekly summary HTML
-    const wsHeader = '<tr><th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700">STORE</th><th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700">CATEGORY</th>'
-      + weeks.map((w,i)=>'<th style="background:'+LIGHT+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700;text-align:center">WEEK '+(i+1)+'<div style="font-size:9px;font-weight:400;opacity:.9">'+esc(weekRange(w))+'</div></th>').join('')
-      + '<th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700;text-align:center">AVG</th></tr>';
-    const wsBody = sliceNames.map(sl => CATS.map((cat,i) => {
-      const m = (bySliceCat[sl]||{})[cat];
-      const cells = weeks.map((w,wi)=> {
-        const wk = (m && m.weekly[wi]) || null;
-        const p = wk ? wk.pct : null;
-        return '<td style="padding:6px;border:1px solid #ccc;text-align:center;background:'+cellBg(p)+';color:'+cellColor(p)+';font-weight:700">'+(p===null?'-':p+'%')+'</td>';
-      }).join('');
-      const avg = m ? m.avg : null;
-      const storeCell = i===0 ? '<td rowspan="'+CATS.length+'" style="padding:8px;border:1px solid #ccc;background:'+YELLOW+';font-weight:700;vertical-align:middle">'+esc(sl)+'</td>' : '';
-      return '<tr>'+storeCell+'<td style="padding:6px;border:1px solid #ccc;background:'+YELLOW+';font-weight:600">'+esc(cat)+'</td>'+cells+'<td style="padding:6px;border:1px solid #ccc;text-align:center;background:'+cellBg(avg)+';color:'+cellColor(avg)+';font-weight:800">'+(avg===null?'-':avg+'%')+'</td></tr>';
-    }).join('')).join('');
-
     // --- Per-store per-category SKU detail ---
-    // Build aggregator: entries[store][group] = { skuMap: {sku -> {description, available, total}} }
     const bystore = {};
     (detRes.entries||[]).forEach(e => {
       const s = e.store, g = e.group;
-      if (!['POULTRY','EGGS','MEAT','RICE','SUGAR'].includes(g)) return;
+      if (!CATS.includes(g)) return;
       bystore[s] = bystore[s] || {};
       bystore[s][g] = bystore[s][g] || {};
       const key = (e.sku||'')+'||'+(e.description||'');
@@ -4496,90 +4481,218 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
       b.total++;
       if (e.status === 'Available') b.available++;
     });
-
-    const detailBlocks = Object.keys(bystore).sort().map(st => {
-      const perCat = CATS.map(cat => {
-        const skus = bystore[st][cat] ? Object.values(bystore[st][cat]).sort((a,b)=> a.rank-b.rank || String(a.sku).localeCompare(String(b.sku))) : [];
-        if (!skus.length) return '';
-        const skuRows = skus.map(k => {
-          const pct = k.total ? Math.round((k.available/k.total)*100) : null;
-          return '<tr><td style="padding:4px 8px;border:1px solid #ccc;font-family:Consolas,monospace;font-size:11px">'+esc(k.sku)+'</td>'
-            + '<td style="padding:4px 8px;border:1px solid #ccc;font-size:11px">'+esc(k.description)+'</td>'
-            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px">'+k.available+'</td>'
-            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px">'+k.total+'</td>'
-            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px;background:'+cellBg(pct)+';color:'+cellColor(pct)+';font-weight:700">'+(pct===null?'-':pct+'%')+'</td></tr>';
-        }).join('');
-        const sumAvail = skus.reduce((n,k)=>n+k.available,0);
-        const sumTotal = skus.reduce((n,k)=>n+k.total,0);
-        const sumPct = sumTotal ? Math.round((sumAvail/sumTotal)*100) : null;
-        return '<tr><td colspan="5" style="padding:6px 10px;background:'+LIGHT+';color:#fff;font-weight:700;border:1px solid #ccc">'+esc(cat)+'</td></tr>'
-          + '<tr><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:left;font-size:11px">SKU CODE</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:left;font-size:11px">SKU DESCRIPTION</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px"># ON SHELF</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px"># CHECKED</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px">% OSA</th></tr>'
-          + skuRows
-          + '<tr><td colspan="2" style="padding:6px 10px;background:#eef;font-weight:700;border:1px solid #ccc;font-size:11px">'+esc(cat)+' SUBTOTAL</td><td style="padding:6px;border:1px solid #ccc;text-align:center;background:#eef;font-weight:700;font-size:11px">'+sumAvail+'</td><td style="padding:6px;border:1px solid #ccc;text-align:center;background:#eef;font-weight:700;font-size:11px">'+sumTotal+'</td><td style="padding:6px;border:1px solid #ccc;text-align:center;font-weight:800;font-size:11px;background:'+cellBg(sumPct)+';color:'+cellColor(sumPct)+'">'+(sumPct===null?'-':sumPct+'%')+'</td></tr>';
-      }).filter(Boolean).join('');
-      // Store overall OSA
-      let gTot=0, gAvail=0;
-      CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { gTot+=k.total; gAvail+=k.available; }); });
-      const gPct = gTot ? Math.round((gAvail/gTot)*100) : null;
-      return '<tr><td colspan="5" style="padding:10px 12px;background:'+DARK+';color:#fff;font-weight:800;font-size:14px;border:1px solid #ccc">STORE: '+esc(st)+' &nbsp;&nbsp;|&nbsp;&nbsp; OVERALL OSA: <span style="background:#fff;color:'+DARK+';padding:2px 10px;border-radius:12px;font-weight:800">'+(gPct===null?'-':gPct+'%')+'</span></td></tr>'
-        + perCat
-        + '<tr><td colspan="5" style="padding:4px;border:0">&nbsp;</td></tr>';
-    }).join('');
-
-    // --- Category totals (across all stores in scope) for a bar visualization ---
     const catTotals = {};
     CATS.forEach(c => catTotals[c] = { available:0, total:0 });
     Object.keys(bystore).forEach(st => CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { catTotals[cat].available+=k.available; catTotals[cat].total+=k.total; }); }));
-    const catBarRows = CATS.map(cat => {
+
+    // --- Build .xlsx with ExcelJS ---
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Fresh Focus 5'; wb.created = new Date();
+    const ws = wb.addWorksheet('OSA Monitoring', { views:[{ showGridLines:false }], properties:{ defaultColWidth:12 } });
+    // Column widths
+    const totalCols = Math.max(weekCols + 3, 9);
+    ws.getColumn(1).width = 24;
+    ws.getColumn(2).width = 14;
+    for (let i=3; i<=totalCols; i++) ws.getColumn(i).width = 13;
+    // Helpers
+    const setFill = (cell, argb) => { cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb } }; };
+    const setFont = (cell, opts) => { cell.font = Object.assign({ name:'Calibri', size:11 }, opts||{}); };
+    const setAlign = (cell, h='center') => { cell.alignment = { horizontal:h, vertical:'middle', wrapText:true }; };
+    const thinBorder = { top:{style:'thin',color:{argb:'FFCCCCCC'}}, left:{style:'thin',color:{argb:'FFCCCCCC'}}, bottom:{style:'thin',color:{argb:'FFCCCCCC'}}, right:{style:'thin',color:{argb:'FFCCCCCC'}} };
+    const addRow = (values) => ws.addRow(values);
+    const mergeRow = (row, span) => ws.mergeCells(row.number, 1, row.number, span);
+
+    // ===== TITLE =====
+    const r1 = addRow(['FRESH ON-SHELF AVAILABILITY MONITORING']);
+    mergeRow(r1, totalCols);
+    r1.height = 26;
+    r1.getCell(1).font = { name:'Calibri', size:16, bold:true, color:{argb:WHITE} };
+    r1.getCell(1).alignment = { horizontal:'center', vertical:'middle' };
+    setFill(r1.getCell(1), DARK);
+    const r2 = addRow(['Period: '+monthLbl+'   |   Prepared by: '+preparedBy+'   |   Generated: '+new Date().toLocaleString()+(area?'   |   Area: '+area:'')+(store?'   |   Store: '+store:'')]);
+    mergeRow(r2, totalCols); setFont(r2.getCell(1), { size:10, italic:true }); r2.getCell(1).alignment = { horizontal:'center' }; r2.height = 18;
+    addRow([]);
+
+    // ===== OVERALL OSA BY CATEGORY (bar) =====
+    const BAR_SEG = 20;
+    const barHdrRow = addRow(['OVERALL OSA BY CATEGORY']);
+    ws.mergeCells(barHdrRow.number, 1, barHdrRow.number, 2+BAR_SEG+1);
+    barHdrRow.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(barHdrRow.getCell(1), DARK); setAlign(barHdrRow.getCell(1), 'left');
+    barHdrRow.height = 20;
+    // sub-header: category | bar segments | % label
+    const barSubHdr = addRow(['CATEGORY'].concat(Array(BAR_SEG).fill('')).concat(['% OSA']));
+    setFill(barSubHdr.getCell(1), DARK); setFont(barSubHdr.getCell(1), { bold:true, color:{argb:WHITE} }); setAlign(barSubHdr.getCell(1));
+    setFill(barSubHdr.getCell(BAR_SEG+2), DARK); setFont(barSubHdr.getCell(BAR_SEG+2), { bold:true, color:{argb:WHITE} }); setAlign(barSubHdr.getCell(BAR_SEG+2));
+    for (let i=0; i<BAR_SEG; i++) { setFill(barSubHdr.getCell(2+i), LGREY); barSubHdr.getCell(2+i).value = ((i+1)*5); setFont(barSubHdr.getCell(2+i), { size:8, color:{argb:'FF789'} }); setAlign(barSubHdr.getCell(2+i)); }
+    CATS.forEach(cat => {
       const b = catTotals[cat]; const p = b.total ? Math.round((b.available/b.total)*100) : null;
-      const barW = p===null ? 0 : p;
-      return '<tr><td style="padding:6px 10px;border:1px solid #ccc;background:'+YELLOW+';font-weight:700;width:120px">'+esc(cat)+'</td>'
-        + '<td style="padding:0;border:1px solid #ccc;width:500px"><div style="background:#eee;height:22px;position:relative"><div style="background:'+cellBg(p)+';height:22px;width:'+barW+'%"></div><div style="position:absolute;top:0;left:8px;line-height:22px;font-weight:700;color:'+(p>=50?'#fff':'#223')+';font-size:11px">'+(p===null?'no data':p+'%')+'</div></div></td>'
-        + '<td style="padding:6px 10px;border:1px solid #ccc;text-align:center;font-size:11px;color:#789">'+b.available+' / '+b.total+'</td></tr>';
-    }).join('');
+      const filled = p===null ? 0 : Math.round((p/100)*BAR_SEG);
+      const barColor = bandFill(p);
+      const row = addRow([cat].concat(Array(BAR_SEG).fill('')).concat([p===null?'-':p+'%']));
+      row.height = 20;
+      setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
+      for (let i=0; i<BAR_SEG; i++) { setFill(row.getCell(2+i), i<filled ? barColor : 'FFF0F0F0'); }
+      setFill(row.getCell(BAR_SEG+2), barColor); setFont(row.getCell(BAR_SEG+2), { bold:true, color:{argb:bandFont(p)} }); setAlign(row.getCell(BAR_SEG+2));
+    });
+    addRow([]);
 
-    // --- Assemble workbook (single sheet) ---
-    const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'
-      + '<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>OSA Monitoring</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>'
-      + '<body style="font-family:Calibri,Arial,sans-serif;padding:0;margin:0">'
-      // Title
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr><td colspan="'+(Math.max(weekCols,5)+3)+'" style="background:'+DARK+';color:#fff;font-weight:800;font-size:20px;text-align:center;padding:14px;letter-spacing:1px">FRESH ON-SHELF AVAILABILITY MONITORING</td></tr>'
-      + '<tr><td colspan="'+(Math.max(weekCols,5)+3)+'" style="background:#f6f8f4;padding:8px 12px;font-size:12px;color:#223"><b>Period:</b> '+esc(monthLbl)+' &nbsp;&nbsp;|&nbsp;&nbsp; <b>Prepared by:</b> '+esc(preparedBy)+' &nbsp;&nbsp;|&nbsp;&nbsp; <b>Generated:</b> '+new Date().toLocaleString()+(area?'<br><b>Area filter:</b> '+esc(area):'')+(store?' &nbsp;<b>Store filter:</b> '+esc(store):'')+'</td></tr></table>'
-      // Overall OSA by Category - bar chart
-      + '<div style="height:12px"></div>'
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
-      + '<tr><td colspan="3" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">OVERALL OSA BY CATEGORY (visual)</td></tr>'
-      + catBarRows
-      + '</table>'
-      // Weekly summary
-      + '<div style="height:12px"></div>'
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
-      + '<tr><td colspan="'+(weekCols+3)+'" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">WEEKLY SUMMARY - % ON SHELF AVAILABILITY (per store)</td></tr>'
-      + wsHeader
-      + wsBody
-      + '</table>'
-      // Per-store detail
-      + '<div style="height:12px"></div>'
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
-      + '<tr><td colspan="5" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">PER STORE MONITORING - DETAILED SKU DATA</td></tr>'
-      + '<tr><td colspan="5" style="background:#f6f8f4;padding:6px 12px;font-size:11px;color:#789;border:1px solid #ccc">Each SKU row shows how many times it was marked Available vs how many times it was checked across the period, with the resulting % On-Shelf Availability.</td></tr>'
-      + detailBlocks
-      + '</table>'
-      // Legend + signatures
-      + '<div style="height:20px"></div>'
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr><td style="padding:8px 12px;font-size:11px;color:#223"><b>Color scale:</b> <span style="background:'+DARK+';color:#fff;padding:3px 8px">&ge; 95%</span> <span style="background:'+LIGHT+';color:#fff;padding:3px 8px">85-94%</span> <span style="background:'+AMBER+';color:#fff;padding:3px 8px">70-84%</span> <span style="background:'+RED+';color:#fff;padding:3px 8px">&lt; 70%</span></td></tr></table>'
-      + '<div style="height:30px"></div>'
-      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr>'
-      + '<td style="width:50%;padding:8px 12px;font-size:12px;border-top:1px solid #223"><b>PREPARED BY:</b> '+esc(preparedBy)+'</td>'
-      + '<td style="width:50%;padding:8px 12px;font-size:12px;border-top:1px solid #223"><b>REVIEWED BY:</b> ____________________</td>'
-      + '</tr></table>'
-      + '</body></html>';
+    // ===== WEEKLY TREND BY CATEGORY (column chart) =====
+    if (weeks.length) {
+      const trHdr = addRow(['WEEKLY TREND - % OSA BY CATEGORY (column chart)']);
+      ws.mergeCells(trHdr.number, 1, trHdr.number, weeks.length+1);
+      trHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(trHdr.getCell(1), DARK); setAlign(trHdr.getCell(1), 'left');
+      trHdr.height = 20;
+      const colHdr = addRow(['CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))));
+      setFill(colHdr.getCell(1), DARK); setFont(colHdr.getCell(1), { bold:true, color:{argb:WHITE} }); setAlign(colHdr.getCell(1));
+      weeks.forEach((w,i) => { const c = colHdr.getCell(i+2); setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); });
+      const rangeHdr = addRow([''].concat(weeks.map(w=>weekRange(w))));
+      weeks.forEach((w,i) => { const c = rangeHdr.getCell(i+2); setFont(c, { size:9, italic:true, color:{argb:'FF789'} }); setAlign(c); });
+      // Compute weekly avg per cat
+      CATS.forEach(cat => {
+        const vals = weeks.map((w,wi) => {
+          let num=0, den=0;
+          Object.keys(bySliceCat).forEach(sl => {
+            const m = (bySliceCat[sl]||{})[cat];
+            if (m && m.weekly[wi] && m.weekly[wi].pct !== null) { num += m.weekly[wi].pct; den++; }
+          });
+          return den ? Math.round(num/den) : null;
+        });
+        const row = addRow([cat].concat(vals.map(v => v===null ? '-' : v+'%')));
+        row.height = 22;
+        setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
+        vals.forEach((v,i) => { const c = row.getCell(i+2); setFill(c, bandFill(v)); setFont(c, { bold:true, color:{argb:bandFont(v)} }); setAlign(c); });
+      });
+      addRow([]);
+    }
 
-    const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+    // ===== WEEKLY SUMMARY PER STORE =====
+    const wsHdr = addRow(['WEEKLY SUMMARY - % ON SHELF AVAILABILITY (per store, per category)']);
+    ws.mergeCells(wsHdr.number, 1, wsHdr.number, weeks.length+3);
+    wsHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(wsHdr.getCell(1), DARK); setAlign(wsHdr.getCell(1), 'left');
+    wsHdr.height = 20;
+    const sumHdr = addRow(['STORE','CATEGORY'].concat(weeks.map((w,i)=>'WEEK '+(i+1))).concat(['AVG']));
+    sumHdr.eachCell((c, idx) => {
+      const isWeek = idx > 2 && idx <= 2+weeks.length;
+      setFill(c, isWeek ? LIGHT : DARK); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c);
+      c.border = thinBorder;
+    });
+    const sumSub = addRow(['','']  .concat(weeks.map(w=>weekRange(w))).concat(['']));
+    sumSub.eachCell((c, idx) => { if (idx>2 && idx<=2+weeks.length) { setFont(c, { size:9, italic:true, color:{argb:WHITE} }); setFill(c, LIGHT); setAlign(c); c.border = thinBorder; } });
+    sliceNames.forEach(sl => {
+      const storeStart = ws.rowCount + 1;
+      CATS.forEach(cat => {
+        const m = (bySliceCat[sl]||{})[cat];
+        const vals = weeks.map((w,i) => (m && m.weekly[i] ? m.weekly[i].pct : null));
+        const avg = m ? m.avg : null;
+        const row = addRow([sl, cat].concat(vals.map(v=>v===null?'-':v+'%')).concat([avg===null?'-':avg+'%']));
+        row.getCell(1).value = sl;
+        setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
+        setFill(row.getCell(2), YELLOW); setFont(row.getCell(2), { bold:true }); setAlign(row.getCell(2), 'left');
+        vals.forEach((v,i) => { const c = row.getCell(i+3); setFill(c, bandFill(v)); setFont(c, { bold:true, color:{argb:bandFont(v)} }); setAlign(c); c.border = thinBorder; });
+        const avgCell = row.getCell(weeks.length+3); setFill(avgCell, bandFill(avg)); setFont(avgCell, { bold:true, color:{argb:bandFont(avg)} }); setAlign(avgCell); avgCell.border = thinBorder;
+        row.getCell(1).border = thinBorder; row.getCell(2).border = thinBorder;
+      });
+      // Merge the STORE cell across the 5 category rows
+      ws.mergeCells(storeStart, 1, storeStart+CATS.length-1, 1);
+      ws.getCell(storeStart, 1).alignment = { horizontal:'left', vertical:'middle', wrapText:true };
+    });
+    addRow([]);
+
+    // ===== PER-STORE OVERALL OSA (ranked bar) =====
+    if (sliceNames.length) {
+      const psHdr = addRow(['PER-STORE OVERALL OSA (ranked)']);
+      ws.mergeCells(psHdr.number, 1, psHdr.number, 2+BAR_SEG+1);
+      psHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(psHdr.getCell(1), DARK); setAlign(psHdr.getCell(1), 'left');
+      psHdr.height = 20;
+      const storeTotals = sliceNames.map(sl => {
+        let num=0, den=0;
+        CATS.forEach(cat => { const m = (bySliceCat[sl]||{})[cat]; if (m && m.avg !== null) { num += m.avg; den++; } });
+        return { store: sl, pct: den ? Math.round(num/den) : null };
+      }).sort((a,b) => (b.pct||0) - (a.pct||0));
+      storeTotals.forEach(t => {
+        const filled = t.pct===null ? 0 : Math.round((t.pct/100)*BAR_SEG);
+        const bc = bandFill(t.pct);
+        const row = addRow([t.store].concat(Array(BAR_SEG).fill('')).concat([t.pct===null?'-':t.pct+'%']));
+        row.height = 20;
+        setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true }); setAlign(row.getCell(1), 'left');
+        for (let i=0; i<BAR_SEG; i++) setFill(row.getCell(2+i), i<filled ? bc : 'FFF0F0F0');
+        setFill(row.getCell(BAR_SEG+2), bc); setFont(row.getCell(BAR_SEG+2), { bold:true, color:{argb:bandFont(t.pct)} }); setAlign(row.getCell(BAR_SEG+2));
+      });
+      addRow([]);
+    }
+
+    // ===== PER-STORE DETAIL (collapsible by category via outlineLevel) =====
+    const detHdr = addRow(['PER STORE MONITORING - DETAILED SKU DATA (click +/- in the left margin to expand per store/category)']);
+    ws.mergeCells(detHdr.number, 1, detHdr.number, 5);
+    detHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(detHdr.getCell(1), DARK); setAlign(detHdr.getCell(1), 'left');
+    detHdr.height = 20;
+    const detColHdr = addRow(['SKU CODE','SKU DESCRIPTION','# ON SHELF','# CHECKED','% OSA']);
+    detColHdr.eachCell(c => { setFill(c, DARK); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+    ws.getColumn(1).width = 24;
+    ws.getColumn(2).width = 45;
+    ws.getColumn(3).width = 13;
+    ws.getColumn(4).width = 13;
+    ws.getColumn(5).width = 11;
+    Object.keys(bystore).sort().forEach(st => {
+      let gTot=0, gAvail=0;
+      CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { gTot+=k.total; gAvail+=k.available; }); });
+      const gPct = gTot ? Math.round((gAvail/gTot)*100) : null;
+      // Store banner row (outline 0)
+      const stRow = addRow(['STORE: '+st, '', '', 'OVERALL', gPct===null?'-':gPct+'%']);
+      ws.mergeCells(stRow.number, 1, stRow.number, 3);
+      stRow.height = 20;
+      [1,2,3,4].forEach(i => { setFill(stRow.getCell(i), DARK); setFont(stRow.getCell(i), { bold:true, color:{argb:WHITE}, size:12 }); });
+      stRow.getCell(1).alignment = { horizontal:'left', vertical:'middle' };
+      setFill(stRow.getCell(5), bandFill(gPct)); setFont(stRow.getCell(5), { bold:true, color:{argb:bandFont(gPct)} }); setAlign(stRow.getCell(5));
+      CATS.forEach(cat => {
+        const skus = bystore[st][cat] ? Object.values(bystore[st][cat]).sort((a,b)=> a.rank-b.rank || String(a.sku).localeCompare(String(b.sku))) : [];
+        if (!skus.length) return;
+        const sumAvail = skus.reduce((n,k)=>n+k.available,0);
+        const sumTotal = skus.reduce((n,k)=>n+k.total,0);
+        const sumPct = sumTotal ? Math.round((sumAvail/sumTotal)*100) : null;
+        // Category header row (outline 1): visible when store expanded
+        const catRow = addRow([cat+' SUBTOTAL','', sumAvail, sumTotal, sumPct===null?'-':sumPct+'%']);
+        catRow.outlineLevel = 1;
+        catRow.height = 18;
+        [1,2,3,4].forEach(i => { setFill(catRow.getCell(i), LIGHT); setFont(catRow.getCell(i), { bold:true, color:{argb:WHITE} }); });
+        catRow.getCell(1).alignment = { horizontal:'left', vertical:'middle' };
+        [3,4].forEach(i => catRow.getCell(i).alignment = { horizontal:'center', vertical:'middle' });
+        setFill(catRow.getCell(5), bandFill(sumPct)); setFont(catRow.getCell(5), { bold:true, color:{argb:bandFont(sumPct)} }); setAlign(catRow.getCell(5));
+        skus.forEach(k => {
+          const pct = k.total ? Math.round((k.available/k.total)*100) : null;
+          const skuRow = addRow([k.sku, k.description, k.available, k.total, pct===null?'-':pct+'%']);
+          skuRow.outlineLevel = 2;  // SKU rows collapsed under category
+          skuRow.getCell(1).font = { name:'Consolas', size:10 };
+          skuRow.getCell(2).font = { size:10 };
+          [3,4].forEach(i => skuRow.getCell(i).alignment = { horizontal:'center', vertical:'middle' });
+          setFill(skuRow.getCell(5), bandFill(pct)); setFont(skuRow.getCell(5), { bold:true, color:{argb:bandFont(pct)} }); setAlign(skuRow.getCell(5));
+          [1,2,3,4,5].forEach(i => skuRow.getCell(i).border = thinBorder);
+        });
+      });
+      addRow([]); // spacer row between stores
+    });
+
+    // Enable row outlining with summary ABOVE detail (so + sign appears on the store/category row)
+    ws.properties.outlineProperties = { summaryBelow: false, summaryRight: false };
+
+    // ===== LEGEND + SIGNATURES =====
+    addRow([]);
+    const lg = addRow(['Color scale:  >=95%  85-94%  70-84%  <70%']);
+    ws.mergeCells(lg.number, 1, lg.number, 5);
+    setFont(lg.getCell(1), { bold:true });
+    addRow([]);
+    const sig = addRow(['PREPARED BY: '+preparedBy, '', '', 'REVIEWED BY:', '____________________']);
+    ws.mergeCells(sig.number, 1, sig.number, 3);
+    sig.getCell(1).font = { bold:true, size:11 };
+    sig.getCell(4).font = { bold:true, size:11 };
+
+    // Save
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-    a.download = 'OSA_Monitoring_'+from+'_to_'+to+'.xls';
+    a.download = 'OSA_Monitoring_'+from+'_to_'+to+'.xlsx';
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
-  } catch (e) { alert('Export failed: '+e.message); }
+  } catch (e) { alert('Export failed: '+e.message); console.error(e); }
   finally { btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.orig || 'Export Excel'; }); }
 }
 

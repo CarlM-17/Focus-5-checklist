@@ -1533,6 +1533,17 @@ app.get('/api/sku-availability', async (req, res) => {
       dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
       return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
     };
+    // Always include every Mon-Sun week between from and to (even weeks with no data)
+    const allWeeksInRange = [];
+    if (from && to) {
+      const start = new Date(from + 'T00:00:00');
+      const end = new Date(to + 'T00:00:00');
+      let cur = new Date(start); cur.setDate(cur.getDate() - ((cur.getDay() + 6) % 7)); // Monday of start week
+      while (cur <= end) {
+        allWeeksInRange.push(cur.getFullYear()+'-'+String(cur.getMonth()+1).padStart(2,'0')+'-'+String(cur.getDate()).padStart(2,'0'));
+        cur.setDate(cur.getDate() + 7);
+      }
+    }
 
     const rows = await sheetsGet('SKUChecklistData!A2:M');
     // Pick latest ReportID per (storeKey, date, slot)
@@ -1578,7 +1589,8 @@ app.get('/api/sku-availability', async (req, res) => {
       if (st === 'Available') b.available++;
     });
 
-    const weeks = [...weekSet].sort();
+    // Union of range-weeks and data-weeks, sorted; prefer range-based layout
+    const weeks = allWeeksInRange.length ? allWeeksInRange : [...weekSet].sort();
     const slices = Object.keys(sliceNameMap).map(k => ({ key:k, name:sliceNameMap[k] })).sort((a,b) => a.name.localeCompare(b.name));
     const categories = ['POULTRY','EGGS','MEAT','RICE','SUGAR'];
     // Flat rows: { slice, category, weekly:[{week,pct,available,total}], avg }
@@ -4901,7 +4913,7 @@ async function loadStockTabRM(){
     if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
     window._osaData = r;
     if (!r.weeks.length) { o.innerHTML = '<div class="muted" style="padding:12px">No submissions in this range.</div>'; return; }
-    const weekLbl = (w) => {
+    const weekRange = (w) => {
       const mon = new Date(w+'T00:00:00'); const sun = new Date(mon); sun.setDate(mon.getDate()+6);
       const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
       return mon.getMonth()===sun.getMonth() ? M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate() : M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate();
@@ -4911,7 +4923,7 @@ async function loadStockTabRM(){
     r.matrix.forEach(m => { (bySlice[m.sliceKey] = bySlice[m.sliceKey] || { name:m.slice, rows:[] }).rows.push(m); });
     const sections = Object.keys(bySlice).sort((a,b) => bySlice[a].name.localeCompare(bySlice[b].name)).map(sliceKey => {
       const s = bySlice[sliceKey];
-      const wkHeaders = r.weeks.map(w => '<th style="padding:6px 4px;text-align:center;font-size:10px;background:#8bc34a;color:#fff;font-weight:700;min-width:70px">'+weekLbl(w)+'</th>').join('');
+      const wkHeaders = r.weeks.map((w,i) => '<th style="padding:6px 4px;text-align:center;background:#8bc34a;color:#fff;font-weight:700;min-width:80px"><div style="font-size:12px">WEEK '+(i+1)+'</div><div style="font-size:9px;opacity:.9;font-weight:400">'+weekRange(w)+'</div></th>').join('');
       const rows = s.rows.map(m => {
         const cells = m.weekly.map(x => '<td style="padding:6px 4px;text-align:center;font-size:12px;border:1px solid #e8e8e8;'+osaCellStyle(x.pct)+'" title="'+(x.pct===null?'no data':x.available+' available / '+x.total+' SKUs')+'">'+(x.pct===null?'&mdash;':x.pct+'%')+'</td>').join('');
         const avgStyle = osaCellStyle(m.avg);
@@ -5135,7 +5147,7 @@ function renderReviewTab(){
     const r = await api('/api/sku-availability?' + qs);
     if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
     if (!r.weeks.length) { o.innerHTML = '<div class="muted" style="padding:12px">No submissions in this range.</div>'; return; }
-    const weekLbl = (w) => {
+    const weekRange = (w) => {
       const mon = new Date(w+'T00:00:00'); const sun = new Date(mon); sun.setDate(mon.getDate()+6);
       const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
       return mon.getMonth()===sun.getMonth() ? M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate() : M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate();
@@ -5145,7 +5157,7 @@ function renderReviewTab(){
     r.matrix.forEach(m => { (bySlice[m.sliceKey] = bySlice[m.sliceKey] || { name:m.slice, rows:[] }).rows.push(m); });
     const sections = Object.keys(bySlice).sort((a,b) => bySlice[a].name.localeCompare(bySlice[b].name)).map(sliceKey => {
       const s = bySlice[sliceKey];
-      const wkHeaders = r.weeks.map(w => '<th style="padding:6px 4px;text-align:center;font-size:10px;background:#8bc34a;color:#fff;font-weight:700;min-width:70px">'+weekLbl(w)+'</th>').join('');
+      const wkHeaders = r.weeks.map((w,i) => '<th style="padding:6px 4px;text-align:center;background:#8bc34a;color:#fff;font-weight:700;min-width:80px"><div style="font-size:12px">WEEK '+(i+1)+'</div><div style="font-size:9px;opacity:.9;font-weight:400">'+weekRange(w)+'</div></th>').join('');
       const rows = s.rows.map(m => {
         const cells = m.weekly.map(x => '<td style="padding:6px 4px;text-align:center;font-size:12px;border:1px solid #e8e8e8;'+osaCellStyleAM(x.pct)+'" title="'+(x.pct===null?'no data':x.available+' available / '+x.total+' SKUs')+'">'+(x.pct===null?'&mdash;':x.pct+'%')+'</td>').join('');
         const avgStyle = osaCellStyleAM(m.avg);

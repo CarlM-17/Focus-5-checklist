@@ -4438,6 +4438,151 @@ function buildFlaggedOverviewHTML(data, flagged, wReports, opts){
     </table>\`;
 }
 
+// ---- OSA Monitoring Excel Export (combined Per-Store + Weekly Summary) ----
+async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
+  if (!from || !to) { alert('Set From and To dates first.'); return; }
+  const btnTxt = 'Preparing Excel... please wait';
+  const btns = document.querySelectorAll('[id^="osaExport"]'); btns.forEach(b => { b.disabled = true; b.dataset.orig = b.textContent; b.textContent = btnTxt; });
+  try {
+    // Fetch per-SKU detail (no status filter → both OOS and Available)
+    const detailQS = 'from='+encodeURIComponent(from)+'&to='+encodeURIComponent(to)+'&area='+encodeURIComponent(area||'')+'&store='+encodeURIComponent(store||'')+'&status=&assigned='+encodeURIComponent(JSON.stringify(assigned||[]));
+    const [detRes, availRes] = await Promise.all([
+      api('/api/sku-detail?'+detailQS),
+      api('/api/sku-availability?from='+encodeURIComponent(from)+'&to='+encodeURIComponent(to)+'&area='+encodeURIComponent(area||'')+'&store='+encodeURIComponent(store||'')+'&groupBy=store&assigned='+encodeURIComponent(JSON.stringify(assigned||[])))
+    ]);
+    if (!detRes.ok) { alert('Detail fetch failed: '+(detRes.error||'')); return; }
+    if (!availRes.ok) { alert('Availability fetch failed: '+(availRes.error||'')); return; }
+    const DARK = '#1f7a3a', LIGHT = '#8bc34a', YELLOW = '#fff59d', AMBER='#e0a020', RED='#c33';
+    const cellBg = (p) => p===null?'#f2f2f2':(p>=95?DARK:p>=85?LIGHT:p>=70?AMBER:RED);
+    const cellColor = (p) => (p===null)?'#999':'#fff';
+    const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const monthLbl = (() => { const d1=new Date(from+'T00:00:00'), d2=new Date(to+'T00:00:00'); const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (d1.getMonth()===d2.getMonth()&&d1.getFullYear()===d2.getFullYear())? M[d1.getMonth()]+' '+d1.getFullYear() : M[d1.getMonth()]+' '+d1.getDate()+' - '+M[d2.getMonth()]+' '+d2.getDate()+', '+d2.getFullYear(); })();
+    const weekRange = (w) => { const mon=new Date(w+'T00:00:00'); const sun=new Date(mon); sun.setDate(mon.getDate()+6); const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return mon.getMonth()===sun.getMonth()?M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate():M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate(); };
+
+    // --- Build weekly summary table (per-store) ---
+    const weeks = availRes.weeks || [];
+    const weekCols = weeks.length;
+    const bySliceCat = {};
+    (availRes.matrix||[]).forEach(m => { bySliceCat[m.slice] = bySliceCat[m.slice] || {}; bySliceCat[m.slice][m.category] = m; });
+    const sliceNames = Object.keys(bySliceCat).sort();
+    const CATS = ['POULTRY','EGGS','MEAT','RICE','SUGAR'];
+
+    // Weekly summary HTML
+    const wsHeader = '<tr><th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700">STORE</th><th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700">CATEGORY</th>'
+      + weeks.map((w,i)=>'<th style="background:'+LIGHT+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700;text-align:center">WEEK '+(i+1)+'<div style="font-size:9px;font-weight:400;opacity:.9">'+esc(weekRange(w))+'</div></th>').join('')
+      + '<th style="background:'+DARK+';color:#fff;padding:8px;border:1px solid #ccc;font-weight:700;text-align:center">AVG</th></tr>';
+    const wsBody = sliceNames.map(sl => CATS.map((cat,i) => {
+      const m = (bySliceCat[sl]||{})[cat];
+      const cells = weeks.map((w,wi)=> {
+        const wk = (m && m.weekly[wi]) || null;
+        const p = wk ? wk.pct : null;
+        return '<td style="padding:6px;border:1px solid #ccc;text-align:center;background:'+cellBg(p)+';color:'+cellColor(p)+';font-weight:700">'+(p===null?'-':p+'%')+'</td>';
+      }).join('');
+      const avg = m ? m.avg : null;
+      const storeCell = i===0 ? '<td rowspan="'+CATS.length+'" style="padding:8px;border:1px solid #ccc;background:'+YELLOW+';font-weight:700;vertical-align:middle">'+esc(sl)+'</td>' : '';
+      return '<tr>'+storeCell+'<td style="padding:6px;border:1px solid #ccc;background:'+YELLOW+';font-weight:600">'+esc(cat)+'</td>'+cells+'<td style="padding:6px;border:1px solid #ccc;text-align:center;background:'+cellBg(avg)+';color:'+cellColor(avg)+';font-weight:800">'+(avg===null?'-':avg+'%')+'</td></tr>';
+    }).join('')).join('');
+
+    // --- Per-store per-category SKU detail ---
+    // Build aggregator: entries[store][group] = { skuMap: {sku -> {description, available, total}} }
+    const bystore = {};
+    (detRes.entries||[]).forEach(e => {
+      const s = e.store, g = e.group;
+      if (!['POULTRY','EGGS','MEAT','RICE','SUGAR'].includes(g)) return;
+      bystore[s] = bystore[s] || {};
+      bystore[s][g] = bystore[s][g] || {};
+      const key = (e.sku||'')+'||'+(e.description||'');
+      const b = bystore[s][g][key] = bystore[s][g][key] || { sku:e.sku, description:e.description, rank:e.rank, available:0, total:0 };
+      b.total++;
+      if (e.status === 'Available') b.available++;
+    });
+
+    const detailBlocks = Object.keys(bystore).sort().map(st => {
+      const perCat = CATS.map(cat => {
+        const skus = bystore[st][cat] ? Object.values(bystore[st][cat]).sort((a,b)=> a.rank-b.rank || String(a.sku).localeCompare(String(b.sku))) : [];
+        if (!skus.length) return '';
+        const skuRows = skus.map(k => {
+          const pct = k.total ? Math.round((k.available/k.total)*100) : null;
+          return '<tr><td style="padding:4px 8px;border:1px solid #ccc;font-family:Consolas,monospace;font-size:11px">'+esc(k.sku)+'</td>'
+            + '<td style="padding:4px 8px;border:1px solid #ccc;font-size:11px">'+esc(k.description)+'</td>'
+            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px">'+k.available+'</td>'
+            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px">'+k.total+'</td>'
+            + '<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:11px;background:'+cellBg(pct)+';color:'+cellColor(pct)+';font-weight:700">'+(pct===null?'-':pct+'%')+'</td></tr>';
+        }).join('');
+        const sumAvail = skus.reduce((n,k)=>n+k.available,0);
+        const sumTotal = skus.reduce((n,k)=>n+k.total,0);
+        const sumPct = sumTotal ? Math.round((sumAvail/sumTotal)*100) : null;
+        return '<tr><td colspan="5" style="padding:6px 10px;background:'+LIGHT+';color:#fff;font-weight:700;border:1px solid #ccc">'+esc(cat)+'</td></tr>'
+          + '<tr><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:left;font-size:11px">SKU CODE</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:left;font-size:11px">SKU DESCRIPTION</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px"># ON SHELF</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px"># CHECKED</th><th style="background:'+YELLOW+';padding:6px;border:1px solid #ccc;text-align:center;font-size:11px">% OSA</th></tr>'
+          + skuRows
+          + '<tr><td colspan="2" style="padding:6px 10px;background:#eef;font-weight:700;border:1px solid #ccc;font-size:11px">'+esc(cat)+' SUBTOTAL</td><td style="padding:6px;border:1px solid #ccc;text-align:center;background:#eef;font-weight:700;font-size:11px">'+sumAvail+'</td><td style="padding:6px;border:1px solid #ccc;text-align:center;background:#eef;font-weight:700;font-size:11px">'+sumTotal+'</td><td style="padding:6px;border:1px solid #ccc;text-align:center;font-weight:800;font-size:11px;background:'+cellBg(sumPct)+';color:'+cellColor(sumPct)+'">'+(sumPct===null?'-':sumPct+'%')+'</td></tr>';
+      }).filter(Boolean).join('');
+      // Store overall OSA
+      let gTot=0, gAvail=0;
+      CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { gTot+=k.total; gAvail+=k.available; }); });
+      const gPct = gTot ? Math.round((gAvail/gTot)*100) : null;
+      return '<tr><td colspan="5" style="padding:10px 12px;background:'+DARK+';color:#fff;font-weight:800;font-size:14px;border:1px solid #ccc">STORE: '+esc(st)+' &nbsp;&nbsp;|&nbsp;&nbsp; OVERALL OSA: <span style="background:#fff;color:'+DARK+';padding:2px 10px;border-radius:12px;font-weight:800">'+(gPct===null?'-':gPct+'%')+'</span></td></tr>'
+        + perCat
+        + '<tr><td colspan="5" style="padding:4px;border:0">&nbsp;</td></tr>';
+    }).join('');
+
+    // --- Category totals (across all stores in scope) for a bar visualization ---
+    const catTotals = {};
+    CATS.forEach(c => catTotals[c] = { available:0, total:0 });
+    Object.keys(bystore).forEach(st => CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { catTotals[cat].available+=k.available; catTotals[cat].total+=k.total; }); }));
+    const catBarRows = CATS.map(cat => {
+      const b = catTotals[cat]; const p = b.total ? Math.round((b.available/b.total)*100) : null;
+      const barW = p===null ? 0 : p;
+      return '<tr><td style="padding:6px 10px;border:1px solid #ccc;background:'+YELLOW+';font-weight:700;width:120px">'+esc(cat)+'</td>'
+        + '<td style="padding:0;border:1px solid #ccc;width:500px"><div style="background:#eee;height:22px;position:relative"><div style="background:'+cellBg(p)+';height:22px;width:'+barW+'%"></div><div style="position:absolute;top:0;left:8px;line-height:22px;font-weight:700;color:'+(p>=50?'#fff':'#223')+';font-size:11px">'+(p===null?'no data':p+'%')+'</div></div></td>'
+        + '<td style="padding:6px 10px;border:1px solid #ccc;text-align:center;font-size:11px;color:#789">'+b.available+' / '+b.total+'</td></tr>';
+    }).join('');
+
+    // --- Assemble workbook (single sheet) ---
+    const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'
+      + '<head><meta charset="utf-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>OSA Monitoring</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head>'
+      + '<body style="font-family:Calibri,Arial,sans-serif;padding:0;margin:0">'
+      // Title
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr><td colspan="'+(Math.max(weekCols,5)+3)+'" style="background:'+DARK+';color:#fff;font-weight:800;font-size:20px;text-align:center;padding:14px;letter-spacing:1px">FRESH ON-SHELF AVAILABILITY MONITORING</td></tr>'
+      + '<tr><td colspan="'+(Math.max(weekCols,5)+3)+'" style="background:#f6f8f4;padding:8px 12px;font-size:12px;color:#223"><b>Period:</b> '+esc(monthLbl)+' &nbsp;&nbsp;|&nbsp;&nbsp; <b>Prepared by:</b> '+esc(preparedBy)+' &nbsp;&nbsp;|&nbsp;&nbsp; <b>Generated:</b> '+new Date().toLocaleString()+(area?'<br><b>Area filter:</b> '+esc(area):'')+(store?' &nbsp;<b>Store filter:</b> '+esc(store):'')+'</td></tr></table>'
+      // Overall OSA by Category - bar chart
+      + '<div style="height:12px"></div>'
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
+      + '<tr><td colspan="3" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">OVERALL OSA BY CATEGORY (visual)</td></tr>'
+      + catBarRows
+      + '</table>'
+      // Weekly summary
+      + '<div style="height:12px"></div>'
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
+      + '<tr><td colspan="'+(weekCols+3)+'" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">WEEKLY SUMMARY - % ON SHELF AVAILABILITY (per store)</td></tr>'
+      + wsHeader
+      + wsBody
+      + '</table>'
+      // Per-store detail
+      + '<div style="height:12px"></div>'
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">'
+      + '<tr><td colspan="5" style="background:'+DARK+';color:#fff;font-weight:800;font-size:14px;padding:8px 12px;border:1px solid '+DARK+'">PER STORE MONITORING - DETAILED SKU DATA</td></tr>'
+      + '<tr><td colspan="5" style="background:#f6f8f4;padding:6px 12px;font-size:11px;color:#789;border:1px solid #ccc">Each SKU row shows how many times it was marked Available vs how many times it was checked across the period, with the resulting % On-Shelf Availability.</td></tr>'
+      + detailBlocks
+      + '</table>'
+      // Legend + signatures
+      + '<div style="height:20px"></div>'
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr><td style="padding:8px 12px;font-size:11px;color:#223"><b>Color scale:</b> <span style="background:'+DARK+';color:#fff;padding:3px 8px">&ge; 95%</span> <span style="background:'+LIGHT+';color:#fff;padding:3px 8px">85-94%</span> <span style="background:'+AMBER+';color:#fff;padding:3px 8px">70-84%</span> <span style="background:'+RED+';color:#fff;padding:3px 8px">&lt; 70%</span></td></tr></table>'
+      + '<div style="height:30px"></div>'
+      + '<table border="0" cellspacing="0" cellpadding="0" style="width:100%"><tr>'
+      + '<td style="width:50%;padding:8px 12px;font-size:12px;border-top:1px solid #223"><b>PREPARED BY:</b> '+esc(preparedBy)+'</td>'
+      + '<td style="width:50%;padding:8px 12px;font-size:12px;border-top:1px solid #223"><b>REVIEWED BY:</b> ____________________</td>'
+      + '</tr></table>'
+      + '</body></html>';
+
+    const blob = new Blob(['\\ufeff'+html], {type:'application/vnd.ms-excel'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'OSA_Monitoring_'+from+'_to_'+to+'.xls';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+  } catch (e) { alert('Export failed: '+e.message); }
+  finally { btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.orig || 'Export Excel'; }); }
+}
+
 function exportWatchlistHQ(){
   const data = STOCK_STATE.lastData;
   const flagged = STOCK_STATE.flaggedStores || [];
@@ -4936,15 +5081,11 @@ async function loadStockTabRM(){
     o.innerHTML = sections + legend;
   }
   $('#osaApply').onclick = runOSA;
-  $('#osaExport').onclick = () => {
-    const d = window._osaData; if (!d) { alert('Apply filters first.'); return; }
-    const header = ['Slice','Category'].concat(d.weeks.map(w => w)).concat(['Avg']);
-    const esc = v => '"'+String(v==null?'':v).replace(/"/g,'""')+'"';
-    const lines = [header.map(esc).join(',')];
-    d.matrix.forEach(m => { lines.push([m.slice,m.category].concat(m.weekly.map(x => x.pct===null?'':x.pct+'%')).concat([m.avg===null?'':m.avg+'%']).map(esc).join(',')); });
-    const blob = new Blob(['\\ufeff'+lines.join('\\r\\n')], {type:'text/csv;charset=utf-8;'});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'OnShelfAvailability_'+todayStr()+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
-  };
+  $('#osaExport').onclick = () => exportOSAExcel({
+    from: $('#osaFrom').value, to: $('#osaTo').value,
+    area: $('#osaArea').value, store: $('#osaStore').value, assigned: osaAssigned,
+    preparedBy: nameOf(S.manager) || S.manager || ''
+  });
   runOSA();
 
   // Wire up detail explorer
@@ -5126,6 +5267,7 @@ function renderReviewTab(){
       <div><label style="font-size:11px;color:#789;display:block">Area</label><select id="osaAreaAM" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${amAreaOpts}</select></div>
       <div><label style="font-size:11px;color:#789;display:block">Store</label><select id="osaStoreAM" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${amStoreOpts}</select></div>
       <button id="osaApplyAM" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+      <button id="osaExportAM" style="padding:7px 14px;background:#345;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Export Excel</button>
     </div>
     <div id="osaOutAM"></div>
   </div>\`;
@@ -5170,6 +5312,11 @@ function renderReviewTab(){
     o.innerHTML = sections + legend;
   }
   $('#osaApplyAM').onclick = runOSAAM;
+  $('#osaExportAM').onclick = () => exportOSAExcel({
+    from: $('#osaFromAM').value, to: $('#osaToAM').value,
+    area: $('#osaAreaAM').value, store: $('#osaStoreAM').value, assigned: S.assignedStores || [],
+    preparedBy: nameOf(S.manager) || S.manager || ''
+  });
   runOSAAM();
 
   async function runAxDetail(){

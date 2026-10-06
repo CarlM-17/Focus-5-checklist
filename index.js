@@ -1496,6 +1496,109 @@ app.get('/api/sku-detail', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// On-Shelf Availability — weekly % per category, optionally sliced by area/store
+app.get('/api/sku-availability', async (req, res) => {
+  try {
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const groupBy = (req.query.groupBy || 'category').trim().toLowerCase(); // category | area | store
+    const areaFilter = (req.query.area || '').trim().toLowerCase();
+    const storeFilter = (req.query.store || '').trim();
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const storeFilterKey = normKey(storeFilter);
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) {}
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
+
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const storeMeta = {}; // storeKey -> { name, area, region }
+    const scopeKeys = new Set();
+    stores.forEach(r => {
+      const remarks = String(r[6]||'').trim().toLowerCase();
+      if (remarks !== 'all' && remarks !== 'focus5sku') return;
+      const sk = normKey(r[4]);
+      storeMeta[sk] = { name: (r[4]||'').trim(), area: (r[2]||'').trim(), region: (r[1]||'').trim() };
+      if (assignedKeys.size) {
+        const ik = normKey(r[3]);
+        if (!(assignedKeys.has(sk) || assignedKeys.has(ik))) return;
+      }
+      if (areaFilter && storeMeta[sk].area.toLowerCase() !== areaFilter) return;
+      if (storeFilterKey && sk !== storeFilterKey) return;
+      scopeKeys.add(sk);
+    });
+
+    const groupOf = (c) => { const u=(c||'').toUpperCase(); return (u==='PORK'||u==='BEEF') ? 'MEAT' : u; };
+    const weekOf = (dateStr) => {
+      const dt = new Date(dateStr + 'T00:00:00');
+      dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+      return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+    };
+
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
+    // Pick latest ReportID per (storeKey, date, slot)
+    const latest = {};
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4]; if (!d) return;
+      if (from && d < from) return;
+      if (to && d > to) return;
+      const sk = normKey(r[3]); if (!scopeKeys.has(sk)) return;
+      const k = sk + '||' + d + '||' + ((r[5]||'AM')+'').trim().toUpperCase();
+      if (!latest[k] || r[1] > latest[k]) latest[k] = r[1];
+    });
+
+    // Aggregate: weekBucket[week][group][category|area|store] = { available, total }
+    const weekSet = new Set();
+    const data = {}; // week -> group(cat) -> sliceKey -> {avail,total}
+    const sliceNameMap = {}; // sliceKey -> display name
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4]; if (!d) return;
+      if (from && d < from) return;
+      if (to && d > to) return;
+      const sk = normKey(r[3]); if (!scopeKeys.has(sk)) return;
+      const slot = ((r[5]||'AM')+'').trim().toUpperCase();
+      const k = sk + '||' + d + '||' + slot;
+      if (latest[k] !== r[1]) return;
+      const grp = groupOf(r[6]);
+      if (!['RICE','EGGS','POULTRY','MEAT','SUGAR'].includes(grp)) return;
+      const st = (r[10]||'').trim();
+      if (st !== 'Available' && st !== 'OOS') return;
+      const wk = weekOf(d); weekSet.add(wk);
+      const meta = storeMeta[sk] || {};
+      let sliceKey, sliceName;
+      if (groupBy === 'store') { sliceKey = sk; sliceName = meta.name || r[3] || ''; }
+      else if (groupBy === 'area') { sliceKey = (meta.area||'(no area)').toLowerCase(); sliceName = meta.area || '(no area)'; }
+      else { sliceKey = 'ALL'; sliceName = 'All (overall)'; }
+      sliceNameMap[sliceKey] = sliceName;
+      data[wk] = data[wk] || {};
+      data[wk][grp] = data[wk][grp] || {};
+      const b = data[wk][grp][sliceKey] = data[wk][grp][sliceKey] || { available:0, total:0 };
+      b.total++;
+      if (st === 'Available') b.available++;
+    });
+
+    const weeks = [...weekSet].sort();
+    const slices = Object.keys(sliceNameMap).map(k => ({ key:k, name:sliceNameMap[k] })).sort((a,b) => a.name.localeCompare(b.name));
+    const categories = ['POULTRY','EGGS','MEAT','RICE','SUGAR'];
+    // Flat rows: { slice, category, weekly:[{week,pct,available,total}], avg }
+    const matrix = [];
+    slices.forEach(sl => {
+      categories.forEach(cat => {
+        const weekly = weeks.map(w => {
+          const b = ((data[w]||{})[cat]||{})[sl.key];
+          if (!b || !b.total) return { week:w, pct:null, available:0, total:0 };
+          return { week:w, pct: Math.round((b.available/b.total)*100), available:b.available, total:b.total };
+        });
+        const valid = weekly.filter(x => x.pct !== null);
+        const avg = valid.length ? Math.round(valid.reduce((n,x)=>n+x.pct,0)/valid.length) : null;
+        matrix.push({ slice: sl.name, sliceKey: sl.key, category: cat, weekly, avg });
+      });
+    });
+    res.json({ ok:true, weeks, slices, categories, matrix });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 function todayLocalPHstr(){
   const nowPH = new Date(Date.now() + 8*3600*1000);
   return nowPH.toISOString().slice(0,10);
@@ -4753,7 +4856,84 @@ async function loadStockTabRM(){
     <div id="dxOut" style="margin-top:4px"></div>
   </div>\`;
 
-  out.innerHTML = kpiRow + amReviewCard + matrixCard + catCard + trendCard + gridCard + latesCard + detailCard;
+  // On-Shelf Availability Monitoring card (weekly % per category, grouped by region/area/store)
+  const areasFromScope = [...new Set(rmRes.storeStats.map(s => s.area).filter(Boolean))].sort();
+  const areaOpts = areasFromScope.map(a => '<option value="'+escapeHtml(a)+'">'+escapeHtml(a)+'</option>').join('');
+  const storeOptsOSA = rmRes.storeStats.map(s => '<option value="'+escapeHtml(s.store)+'">'+escapeHtml(s.store)+'</option>').join('');
+  // Default: last 5 weeks (35 days)
+  const osaTo = todayStr();
+  const osaFromD = new Date(); osaFromD.setDate(osaFromD.getDate() - 34);
+  const osaFrom = osaFromD.getFullYear()+'-'+String(osaFromD.getMonth()+1).padStart(2,'0')+'-'+String(osaFromD.getDate()).padStart(2,'0');
+  const osaCard = \`<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">On-Shelf Availability Monitoring</h3>
+      <span class="muted" style="font-size:12px">% Available by category per week</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="osaFrom" type="date" value="\${osaFrom}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="osaTo" type="date" value="\${osaTo}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">View</label><select id="osaGroup" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="category">Overall</option><option value="area">Per Area</option><option value="store">Per Store</option></select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Area</label><select id="osaArea" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${areaOpts}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Store</label><select id="osaStore" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${storeOptsOSA}</select></div>
+      <button id="osaApply" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+      <button id="osaExport" style="padding:7px 14px;background:#345;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Export CSV</button>
+    </div>
+    <div id="osaOut"></div>
+  </div>\`;
+
+  out.innerHTML = kpiRow + amReviewCard + matrixCard + osaCard + catCard + trendCard + gridCard + latesCard + detailCard;
+
+  // Wire up On-Shelf Availability
+  const osaAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
+  function osaCellStyle(pct){
+    if (pct === null) return 'background:#f7f7f7;color:#bbb';
+    if (pct >= 95) return 'background:#1f7a3a;color:#fff;font-weight:700';
+    if (pct >= 85) return 'background:#8bc34a;color:#fff;font-weight:700';
+    if (pct >= 70) return 'background:#e0a020;color:#fff;font-weight:700';
+    return 'background:#c33;color:#fff;font-weight:700';
+  }
+  async function runOSA(){
+    const o = $('#osaOut'); o.innerHTML = '<div class="muted" style="padding:12px">Loading...</div>';
+    const qs = 'from=' + encodeURIComponent($('#osaFrom').value||'') + '&to=' + encodeURIComponent($('#osaTo').value||'')
+      + '&groupBy=' + encodeURIComponent($('#osaGroup').value||'category') + '&area=' + encodeURIComponent($('#osaArea').value||'')
+      + '&store=' + encodeURIComponent($('#osaStore').value||'') + '&assigned=' + encodeURIComponent(JSON.stringify(osaAssigned||[]));
+    const r = await api('/api/sku-availability?' + qs);
+    if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    window._osaData = r;
+    if (!r.weeks.length) { o.innerHTML = '<div class="muted" style="padding:12px">No submissions in this range.</div>'; return; }
+    const weekLbl = (w) => {
+      const mon = new Date(w+'T00:00:00'); const sun = new Date(mon); sun.setDate(mon.getDate()+6);
+      const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return mon.getMonth()===sun.getMonth() ? M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate() : M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate();
+    };
+    const groupBy = $('#osaGroup').value || 'category';
+    const bySlice = {};
+    r.matrix.forEach(m => { (bySlice[m.sliceKey] = bySlice[m.sliceKey] || { name:m.slice, rows:[] }).rows.push(m); });
+    const sections = Object.keys(bySlice).sort((a,b) => bySlice[a].name.localeCompare(bySlice[b].name)).map(sliceKey => {
+      const s = bySlice[sliceKey];
+      const wkHeaders = r.weeks.map(w => '<th style="padding:6px 4px;text-align:center;font-size:10px;background:#8bc34a;color:#fff;font-weight:700;min-width:70px">'+weekLbl(w)+'</th>').join('');
+      const rows = s.rows.map(m => {
+        const cells = m.weekly.map(x => '<td style="padding:6px 4px;text-align:center;font-size:12px;border:1px solid #e8e8e8;'+osaCellStyle(x.pct)+'" title="'+(x.pct===null?'no data':x.available+' available / '+x.total+' SKUs')+'">'+(x.pct===null?'&mdash;':x.pct+'%')+'</td>').join('');
+        const avgStyle = osaCellStyle(m.avg);
+        return '<tr><td style="padding:6px 10px;font-weight:700;font-size:12px;border:1px solid #e8e8e8;background:#fffde7">'+escapeHtml(m.category)+'</td>'+cells+'<td style="padding:6px 10px;text-align:center;font-size:12px;border:1px solid #e8e8e8;font-weight:800;'+avgStyle+'">'+(m.avg===null?'&mdash;':m.avg+'%')+'</td></tr>';
+      }).join('');
+      const title = (groupBy === 'category') ? '' : '<h4 style="margin:14px 0 6px;color:#1f7a3a;font-size:13px">'+escapeHtml(s.name)+'</h4>';
+      return title + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:500px"><thead><tr><th style="padding:6px 10px;text-align:left;background:#fff59d;color:#222;font-weight:700;min-width:120px">CATEGORY</th><th colspan="'+r.weeks.length+'" style="padding:6px;text-align:center;background:#8bc34a;color:#fff;font-weight:700">% ON SHELF AVAILABILITY</th><th rowspan="2" style="padding:6px;text-align:center;background:#fff59d;color:#222;font-weight:700;min-width:70px">AVG</th></tr><tr><th style="background:#fff59d"></th>'+wkHeaders+'</tr></thead><tbody>'+rows+'</tbody></table></div>';
+    }).join('');
+    const legend = '<div style="margin-top:10px;font-size:11px;color:#789">Scale: <span style="background:#1f7a3a;color:#fff;padding:2px 6px;border-radius:3px">&ge;95%</span> <span style="background:#8bc34a;color:#fff;padding:2px 6px;border-radius:3px">85-94%</span> <span style="background:#e0a020;color:#fff;padding:2px 6px;border-radius:3px">70-84%</span> <span style="background:#c33;color:#fff;padding:2px 6px;border-radius:3px">&lt;70%</span></div>';
+    o.innerHTML = sections + legend;
+  }
+  $('#osaApply').onclick = runOSA;
+  $('#osaExport').onclick = () => {
+    const d = window._osaData; if (!d) { alert('Apply filters first.'); return; }
+    const header = ['Slice','Category'].concat(d.weeks.map(w => w)).concat(['Avg']);
+    const esc = v => '"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+    const lines = [header.map(esc).join(',')];
+    d.matrix.forEach(m => { lines.push([m.slice,m.category].concat(m.weekly.map(x => x.pct===null?'':x.pct+'%')).concat([m.avg===null?'':m.avg+'%']).map(esc).join(',')); });
+    const blob = new Blob(['\\ufeff'+lines.join('\\r\\n')], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'OnShelfAvailability_'+todayStr()+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+  };
+  runOSA();
 
   // Wire up detail explorer
   const dxAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
@@ -4915,7 +5095,70 @@ function renderReviewTab(){
     <div id="axOut"></div>
   </div>\`;
 
-  out.innerHTML = headerCard + amSection + pmSection + matrixCard_AM + detailCard_AM;
+  // On-Shelf Availability card for AM (per-area or per-store view within their assigned stores)
+  const amAreas = [...new Set(items.map(x => x.area).filter(Boolean))].sort();
+  const amAreaOpts = amAreas.map(a => '<option value="'+escapeHtml(a)+'">'+escapeHtml(a)+'</option>').join('');
+  const amStoreOpts = [...new Set(items.map(x => x.store))].sort().map(s => '<option value="'+escapeHtml(s)+'">'+escapeHtml(s)+'</option>').join('');
+  const osaToAM = todayStr();
+  const osaFromDAM = new Date(); osaFromDAM.setDate(osaFromDAM.getDate() - 34);
+  const osaFromAM = osaFromDAM.getFullYear()+'-'+String(osaFromDAM.getMonth()+1).padStart(2,'0')+'-'+String(osaFromDAM.getDate()).padStart(2,'0');
+  const osaCardAM = \`<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">On-Shelf Availability Monitoring</h3>
+      <span class="muted" style="font-size:12px">% Available by category per week - your stores</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px">
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="osaFromAM" type="date" value="\${osaFromAM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="osaToAM" type="date" value="\${osaToAM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">View</label><select id="osaGroupAM" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="category">Overall (your area)</option><option value="area">Per Area</option><option value="store">Per Store</option></select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Area</label><select id="osaAreaAM" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${amAreaOpts}</select></div>
+      <div><label style="font-size:11px;color:#789;display:block">Store</label><select id="osaStoreAM" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"><option value="">All</option>\${amStoreOpts}</select></div>
+      <button id="osaApplyAM" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+    </div>
+    <div id="osaOutAM"></div>
+  </div>\`;
+
+  out.innerHTML = headerCard + amSection + pmSection + matrixCard_AM + osaCardAM + detailCard_AM;
+
+  function osaCellStyleAM(pct){
+    if (pct === null) return 'background:#f7f7f7;color:#bbb';
+    if (pct >= 95) return 'background:#1f7a3a;color:#fff;font-weight:700';
+    if (pct >= 85) return 'background:#8bc34a;color:#fff;font-weight:700';
+    if (pct >= 70) return 'background:#e0a020;color:#fff;font-weight:700';
+    return 'background:#c33;color:#fff;font-weight:700';
+  }
+  async function runOSAAM(){
+    const o = $('#osaOutAM'); o.innerHTML = '<div class="muted" style="padding:12px">Loading...</div>';
+    const qs = 'from=' + encodeURIComponent($('#osaFromAM').value||'') + '&to=' + encodeURIComponent($('#osaToAM').value||'')
+      + '&groupBy=' + encodeURIComponent($('#osaGroupAM').value||'category') + '&area=' + encodeURIComponent($('#osaAreaAM').value||'')
+      + '&store=' + encodeURIComponent($('#osaStoreAM').value||'') + '&assigned=' + encodeURIComponent(JSON.stringify(S.assignedStores||[]));
+    const r = await api('/api/sku-availability?' + qs);
+    if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    if (!r.weeks.length) { o.innerHTML = '<div class="muted" style="padding:12px">No submissions in this range.</div>'; return; }
+    const weekLbl = (w) => {
+      const mon = new Date(w+'T00:00:00'); const sun = new Date(mon); sun.setDate(mon.getDate()+6);
+      const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return mon.getMonth()===sun.getMonth() ? M[mon.getMonth()]+' '+mon.getDate()+'-'+sun.getDate() : M[mon.getMonth()]+' '+mon.getDate()+' - '+M[sun.getMonth()]+' '+sun.getDate();
+    };
+    const groupBy = $('#osaGroupAM').value || 'category';
+    const bySlice = {};
+    r.matrix.forEach(m => { (bySlice[m.sliceKey] = bySlice[m.sliceKey] || { name:m.slice, rows:[] }).rows.push(m); });
+    const sections = Object.keys(bySlice).sort((a,b) => bySlice[a].name.localeCompare(bySlice[b].name)).map(sliceKey => {
+      const s = bySlice[sliceKey];
+      const wkHeaders = r.weeks.map(w => '<th style="padding:6px 4px;text-align:center;font-size:10px;background:#8bc34a;color:#fff;font-weight:700;min-width:70px">'+weekLbl(w)+'</th>').join('');
+      const rows = s.rows.map(m => {
+        const cells = m.weekly.map(x => '<td style="padding:6px 4px;text-align:center;font-size:12px;border:1px solid #e8e8e8;'+osaCellStyleAM(x.pct)+'" title="'+(x.pct===null?'no data':x.available+' available / '+x.total+' SKUs')+'">'+(x.pct===null?'&mdash;':x.pct+'%')+'</td>').join('');
+        const avgStyle = osaCellStyleAM(m.avg);
+        return '<tr><td style="padding:6px 10px;font-weight:700;font-size:12px;border:1px solid #e8e8e8;background:#fffde7">'+escapeHtml(m.category)+'</td>'+cells+'<td style="padding:6px 10px;text-align:center;font-size:12px;border:1px solid #e8e8e8;font-weight:800;'+avgStyle+'">'+(m.avg===null?'&mdash;':m.avg+'%')+'</td></tr>';
+      }).join('');
+      const title = (groupBy === 'category') ? '' : '<h4 style="margin:14px 0 6px;color:#1f7a3a;font-size:13px">'+escapeHtml(s.name)+'</h4>';
+      return title + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:500px"><thead><tr><th style="padding:6px 10px;text-align:left;background:#fff59d;color:#222;font-weight:700;min-width:120px">CATEGORY</th><th colspan="'+r.weeks.length+'" style="padding:6px;text-align:center;background:#8bc34a;color:#fff;font-weight:700">% ON SHELF AVAILABILITY</th><th rowspan="2" style="padding:6px;text-align:center;background:#fff59d;color:#222;font-weight:700;min-width:70px">AVG</th></tr><tr><th style="background:#fff59d"></th>'+wkHeaders+'</tr></thead><tbody>'+rows+'</tbody></table></div>';
+    }).join('');
+    const legend = '<div style="margin-top:10px;font-size:11px;color:#789">Scale: <span style="background:#1f7a3a;color:#fff;padding:2px 6px;border-radius:3px">&ge;95%</span> <span style="background:#8bc34a;color:#fff;padding:2px 6px;border-radius:3px">85-94%</span> <span style="background:#e0a020;color:#fff;padding:2px 6px;border-radius:3px">70-84%</span> <span style="background:#c33;color:#fff;padding:2px 6px;border-radius:3px">&lt;70%</span></div>';
+    o.innerHTML = sections + legend;
+  }
+  $('#osaApplyAM').onclick = runOSAAM;
+  runOSAAM();
 
   async function runAxDetail(){
     const o = $('#axOut'); o.innerHTML = '<div class="muted" style="padding:10px">Loading...</div>';

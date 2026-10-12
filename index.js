@@ -426,11 +426,21 @@ app.get('/api/stores', async (req, res) => {
   try {
     const manager = (req.query.manager || '').trim().toLowerCase();
     const level = (req.query.level || '').trim().toLowerCase();
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) {}
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
     // ListOfStores columns: A=No, B=Region, C=AREA, D=STORE ID, E=STORE NAME, F=Remarks, G=AreaManager
     const rows = await sheetsGet('ListOfStores!A2:G');
     const isRegional = level === 'regional manager';
     const stores = rows
-      .filter((r) => isRegional || (r[6] || '').trim().toLowerCase() === manager)
+      .filter((r) => {
+        if (isRegional) return !!r[4];
+        if (!r[4]) return false;
+        // Prefer assignedStores (from signup); fall back to legacy col G AreaManager match
+        if (assignedKeys.size) return assignedKeys.has(normKey(r[4])) || assignedKeys.has(normKey(r[3]));
+        return (r[6] || '').trim().toLowerCase() === manager;
+      })
       .map((r) => r[4])
       .filter(Boolean);
     res.json({ ok: true, stores });
@@ -2496,7 +2506,7 @@ document.querySelectorAll('#tabSCheck button[data-slot]').forEach(b => b.onclick
 setInterval(() => { if (!$('#tabSCheck').classList.contains('hidden')) { const auto=autoSlot(); if (slotOpen(auto)) { S.scSlot=auto; $('#scSlotLbl').textContent=S.scSlot; } highlightSlotBtn(); } }, 60000);
 
 async function loadStores(){
-  const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||''));
+  const r = await api('/api/stores?manager=' + encodeURIComponent(S.manager) + '&level=' + encodeURIComponent(S.level||'') + '&assigned=' + encodeURIComponent(JSON.stringify(S.assignedStores||[])));
   const sel = $('#store'); sel.innerHTML = '';
   (r.stores||[]).forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
   if (!r.stores || !r.stores.length) sel.innerHTML = '<option>(no stores assigned)</option>';
@@ -4449,7 +4459,7 @@ function buildFlaggedOverviewHTML(data, flagged, wReports, opts){
 }
 
 // ---- OSA Monitoring Excel Export (combined Per-Store + Weekly Summary) ----
-async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
+async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isRegional }){
   if (!from || !to) { alert('Set From and To dates first.'); return; }
   if (typeof ExcelJS === 'undefined') { alert('Excel library still loading. Please wait a moment and try again.'); return; }
   const btnTxt = 'Preparing Excel... please wait';
@@ -4943,6 +4953,292 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     });
     // Freeze top-left (first 2 cols + the header rows)
     ws2.views = [{ state:'frozen', xSplit:2, ySplit:3, showGridLines:false }];
+
+    // ===== SHEET 3: TECHNICAL ANALYSIS (Regional Manager only) =====
+    if (isRegional) {
+      const ws3 = wb.addWorksheet('Technical Analysis', { views:[{ showGridLines:false }], properties:{ defaultColWidth:14 } });
+      ws3.getColumn(1).width = 26; ws3.getColumn(2).width = 14; ws3.getColumn(3).width = 14; ws3.getColumn(4).width = 14; ws3.getColumn(5).width = 14; ws3.getColumn(6).width = 16; ws3.getColumn(7).width = 42;
+      const TA_COLS = 7;
+
+      // Title
+      const taT = ws3.addRow([(scopeLabel ? scopeLabel+' ' : '') + 'FRESH OSA - TECHNICAL ANALYSIS & RECOMMENDATIONS']);
+      ws3.mergeCells(taT.number, 1, taT.number, TA_COLS); taT.height = 26;
+      taT.getCell(1).font = { bold:true, color:{argb:WHITE}, size:14 }; setFill(taT.getCell(1), DARK); taT.getCell(1).alignment = { horizontal:'center', vertical:'middle' };
+      const taMeta = ws3.addRow(['Period: '+monthLbl+'  |  Weeks analyzed: '+weeks.length+'  |  Methodology: WoW delta, linear trend slope, Pareto 80/20, SPC-style outliers (mean +/- 2sd), gap-to-target (95%)']);
+      ws3.mergeCells(taMeta.number, 1, taMeta.number, TA_COLS); taMeta.getCell(1).font = { italic:true, size:10, color:{argb:'FF556'} }; taMeta.getCell(1).alignment = { horizontal:'left', indent:1, wrapText:true }; taMeta.height = 32;
+      ws3.addRow([]);
+
+      // Build full dataset: per store/cat weekly % array (aligned to weeks[])
+      const storeCatWeek = {}; // store -> cat -> [pct per week]
+      const CATS_T = CATS;
+      Object.keys(bystore).forEach(st => {
+        storeCatWeek[st] = {};
+        CATS_T.forEach(cat => {
+          storeCatWeek[st][cat] = weeks.map(w => {
+            let a=0, t=0;
+            if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { const wb_ = k.weekly[w]; if (wb_) { a += wb_.available; t += wb_.total; } });
+            return t ? Math.round((a/t)*100) : null;
+          });
+        });
+      });
+
+      // Helpers
+      const avg = (arr) => { const v = arr.filter(x => x !== null); return v.length ? v.reduce((n,x)=>n+x,0)/v.length : null; };
+      const slope = (arr) => {
+        // Simple linear regression slope over week-index
+        const pts = arr.map((v,i) => (v === null ? null : [i,v])).filter(Boolean);
+        if (pts.length < 2) return null;
+        const n = pts.length;
+        const sx = pts.reduce((s,p)=>s+p[0],0);
+        const sy = pts.reduce((s,p)=>s+p[1],0);
+        const sxy = pts.reduce((s,p)=>s+p[0]*p[1],0);
+        const sxx = pts.reduce((s,p)=>s+p[0]*p[0],0);
+        const denom = n*sxx - sx*sx;
+        if (!denom) return null;
+        return (n*sxy - sx*sy) / denom; // pts per week
+      };
+      const stddev = (arr) => {
+        const v = arr.filter(x => x !== null);
+        if (v.length < 2) return null;
+        const m = v.reduce((s,x)=>s+x,0)/v.length;
+        return Math.sqrt(v.reduce((s,x)=>s+(x-m)*(x-m),0)/v.length);
+      };
+      const wow = (arr) => { // last two weeks delta
+        const v = arr.filter(x => x !== null);
+        if (v.length < 2) return null;
+        return v[v.length-1] - v[v.length-2];
+      };
+
+      // --- Section 1: Store-level trend analysis ---
+      const sec1 = ws3.addRow(['SECTION 1: STORE-LEVEL TREND ANALYSIS']);
+      ws3.mergeCells(sec1.number, 1, sec1.number, TA_COLS); sec1.height = 20;
+      sec1.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec1.getCell(1), DARK); sec1.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec1Hdr = ws3.addRow(['STORE','AVG %','LATEST %','WoW DELTA','SLOPE/wk','GAP vs 95%','VERDICT']);
+      sec1Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const storeRows = Object.keys(storeCatWeek).map(st => {
+        // Collapse across cats weighted equally
+        const perWeek = weeks.map((w,wi) => {
+          const vals = CATS_T.map(c => storeCatWeek[st][c][wi]).filter(x => x !== null);
+          return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null;
+        });
+        const a = avg(perWeek), sl = slope(perWeek), ww = wow(perWeek);
+        const lastValid = [...perWeek].reverse().find(x => x !== null) ?? null;
+        const gap = lastValid === null ? null : (95 - lastValid);
+        let verdict;
+        if (sl === null) verdict = 'Insufficient data';
+        else if (sl > 1.5 && (ww||0) > 0) verdict = 'IMPROVING — maintain cadence';
+        else if (sl < -1.5 || (ww||0) < -5) verdict = 'DECLINING — intervene';
+        else if (lastValid !== null && lastValid >= 95) verdict = 'ON TARGET — sustain';
+        else verdict = 'STABLE — push to 95% target';
+        return { st, avg:a, latest:lastValid, ww, sl, gap, verdict };
+      }).sort((a,b) => (a.avg||0) - (b.avg||0));
+      storeRows.forEach(r => {
+        const row = ws3.addRow([r.st, r.avg===null?'-':Math.round(r.avg)+'%', r.latest===null?'-':r.latest+'%', r.ww===null?'-':(r.ww>0?'+':'')+r.ww+' pts', r.sl===null?'-':(r.sl>0?'+':'')+r.sl.toFixed(2)+' pts', r.gap===null?'-':(r.gap>0?'-'+r.gap+' pts below':(Math.abs(r.gap))+' pts over'), r.verdict]);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        [2,3].forEach(i => { const c = row.getCell(i); const pct = (i===2?r.avg:r.latest); setFill(c, bandFill(pct===null?null:Math.round(pct))); setFont(c, { bold:true, color:{argb:bandFont(pct===null?null:Math.round(pct))} }); setAlign(c); });
+        // WoW color
+        const wc = row.getCell(4); if (r.ww !== null) { const bg = r.ww > 2 ? DARK : r.ww < -2 ? RED : AMBER; setFill(wc, bg); setFont(wc, { bold:true, color:{argb:WHITE} }); } setAlign(wc);
+        const sc = row.getCell(5); if (r.sl !== null) { const bg = r.sl > 1.5 ? DARK : r.sl < -1.5 ? RED : AMBER; setFill(sc, bg); setFont(sc, { bold:true, color:{argb:WHITE} }); } setAlign(sc);
+        setAlign(row.getCell(6));
+        const vc = row.getCell(7);
+        const vbg = r.verdict.startsWith('IMPROVING') || r.verdict.startsWith('ON TARGET') ? DARK : r.verdict.startsWith('DECLINING') ? RED : YELLOW;
+        setFill(vc, vbg); setFont(vc, { bold:true, color:{argb: vbg===YELLOW ? 'FF333333' : WHITE }, size:10 }); vc.alignment = { horizontal:'left', vertical:'middle', indent:1, wrapText:true };
+        [1,2,3,4,5,6,7].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // --- Section 2: Category-level trend ---
+      const sec2 = ws3.addRow(['SECTION 2: CATEGORY-LEVEL TREND ANALYSIS']);
+      ws3.mergeCells(sec2.number, 1, sec2.number, TA_COLS); sec2.height = 20;
+      sec2.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec2.getCell(1), DARK); sec2.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec2Hdr = ws3.addRow(['CATEGORY','AVG %','LATEST %','WoW DELTA','SLOPE/wk','VOLATILITY (SD)','VERDICT']);
+      sec2Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      CATS_T.forEach(cat => {
+        const perWeek = weeks.map((w,wi) => {
+          const vals = Object.keys(storeCatWeek).map(st => storeCatWeek[st][cat][wi]).filter(x => x !== null);
+          return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null;
+        });
+        const a = avg(perWeek), sl = slope(perWeek), ww = wow(perWeek), sd = stddev(perWeek);
+        const lastValid = [...perWeek].reverse().find(x => x !== null) ?? null;
+        let verdict;
+        if (sl === null) verdict = 'Insufficient data';
+        else if (sl > 1.5) verdict = 'IMPROVING';
+        else if (sl < -1.5) verdict = 'DECLINING — root cause review';
+        else if (sd !== null && sd > 10) verdict = 'VOLATILE — stabilize supply';
+        else if (lastValid !== null && lastValid >= 95) verdict = 'ON TARGET';
+        else verdict = 'STABLE — below target';
+        const row = ws3.addRow([cat, a===null?'-':Math.round(a)+'%', lastValid===null?'-':lastValid+'%', ww===null?'-':(ww>0?'+':'')+ww+' pts', sl===null?'-':(sl>0?'+':'')+sl.toFixed(2)+' pts', sd===null?'-':sd.toFixed(1), verdict]);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        [2,3].forEach(i => { const c = row.getCell(i); const pct = (i===2?a:lastValid); setFill(c, bandFill(pct===null?null:Math.round(pct))); setFont(c, { bold:true, color:{argb:bandFont(pct===null?null:Math.round(pct))} }); setAlign(c); });
+        const wc = row.getCell(4); if (ww !== null) { const bg = ww > 2 ? DARK : ww < -2 ? RED : AMBER; setFill(wc, bg); setFont(wc, { bold:true, color:{argb:WHITE} }); } setAlign(wc);
+        const sc = row.getCell(5); if (sl !== null) { const bg = sl > 1.5 ? DARK : sl < -1.5 ? RED : AMBER; setFill(sc, bg); setFont(sc, { bold:true, color:{argb:WHITE} }); } setAlign(sc);
+        setAlign(row.getCell(6));
+        const vc = row.getCell(7);
+        const vbg = verdict.startsWith('IMPROVING') || verdict.startsWith('ON TARGET') ? DARK : verdict.startsWith('DECLINING') || verdict.startsWith('VOLATILE') ? RED : YELLOW;
+        setFill(vc, vbg); setFont(vc, { bold:true, color:{argb: vbg===YELLOW ? 'FF333333' : WHITE }, size:10 }); vc.alignment = { horizontal:'left', vertical:'middle', indent:1, wrapText:true };
+        [1,2,3,4,5,6,7].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // --- Section 3: Pareto — top OOS contributors (store x category) ---
+      const sec3 = ws3.addRow(['SECTION 3: PARETO - TOP OOS CONTRIBUTORS (80/20 rule)']);
+      ws3.mergeCells(sec3.number, 1, sec3.number, TA_COLS); sec3.height = 20;
+      sec3.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec3.getCell(1), DARK); sec3.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec3Hdr = ws3.addRow(['RANK','STORE / CATEGORY','OOS COUNT','% OF TOTAL OOS','CUMULATIVE %','','PRIORITY']);
+      sec3Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const paretoList = [];
+      let totalOOS = 0;
+      Object.keys(bystore).forEach(st => CATS_T.forEach(cat => {
+        if (!bystore[st][cat]) return;
+        let oos = 0;
+        Object.values(bystore[st][cat]).forEach(k => { oos += (k.total - k.available); });
+        if (oos > 0) { paretoList.push({ label: st + ' / ' + cat, oos }); totalOOS += oos; }
+      }));
+      paretoList.sort((a,b) => b.oos - a.oos);
+      let cum = 0;
+      paretoList.slice(0, 15).forEach((p, idx) => {
+        const pct = totalOOS ? Math.round((p.oos/totalOOS)*100) : 0;
+        cum += pct;
+        const priority = cum <= 80 ? 'VITAL FEW (80%)' : 'useful many';
+        const row = ws3.addRow([idx+1, p.label, p.oos, pct+'%', cum+'%', '', priority]);
+        row.getCell(1).alignment = { horizontal:'center' }; row.getCell(1).font = { bold:true };
+        row.getCell(2).alignment = { horizontal:'left', indent:1 }; row.getCell(2).font = { bold:true };
+        [3,4,5].forEach(i => row.getCell(i).alignment = { horizontal:'center' });
+        if (cum <= 80) { setFill(row.getCell(7), RED); setFont(row.getCell(7), { bold:true, color:{argb:WHITE}, size:10 }); }
+        else { setFill(row.getCell(7), 'FFEEEEEE'); setFont(row.getCell(7), { size:10, color:{argb:'FF789'} }); }
+        row.getCell(7).alignment = { horizontal:'left', indent:1 };
+        [1,2,3,4,5,7].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // --- Section 4: SPC-style outliers (stores far from mean) ---
+      const sec4 = ws3.addRow(['SECTION 4: STATISTICAL OUTLIERS (SPC - control limits mean +/- 2 standard deviations)']);
+      ws3.mergeCells(sec4.number, 1, sec4.number, TA_COLS); sec4.height = 20;
+      sec4.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec4.getCell(1), DARK); sec4.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec4Hdr = ws3.addRow(['STORE','OSA %','MEAN %','UPPER CTRL (+2sd)','LOWER CTRL (-2sd)','STATUS','']);
+      sec4Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const storeAvgPct = storeRows.map(s => s.avg).filter(x => x !== null);
+      const meanAll = storeAvgPct.length ? storeAvgPct.reduce((n,v)=>n+v,0)/storeAvgPct.length : null;
+      const sdAll = storeAvgPct.length > 1 ? Math.sqrt(storeAvgPct.reduce((s,x)=>s+(x-meanAll)*(x-meanAll),0)/storeAvgPct.length) : null;
+      const ucl = meanAll !== null && sdAll !== null ? Math.min(100, meanAll + 2*sdAll) : null;
+      const lcl = meanAll !== null && sdAll !== null ? Math.max(0, meanAll - 2*sdAll) : null;
+      storeRows.forEach(s => {
+        if (s.avg === null || meanAll === null) return;
+        const status = s.avg > ucl ? 'OUTLIER (above) - benchmark' : s.avg < lcl ? 'OUTLIER (below) - escalate' : 'In control';
+        const row = ws3.addRow([s.st, Math.round(s.avg)+'%', Math.round(meanAll)+'%', Math.round(ucl)+'%', Math.round(lcl)+'%', status, '']);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        [2,3,4,5].forEach(i => { const c = row.getCell(i); setAlign(c); });
+        setFill(row.getCell(2), bandFill(Math.round(s.avg))); setFont(row.getCell(2), { bold:true, color:{argb:bandFont(Math.round(s.avg))} });
+        const sc = row.getCell(6);
+        if (status.startsWith('OUTLIER (above)')) { setFill(sc, DARK); setFont(sc, { bold:true, color:{argb:WHITE} }); }
+        else if (status.startsWith('OUTLIER (below)')) { setFill(sc, RED); setFont(sc, { bold:true, color:{argb:WHITE} }); }
+        else { setFill(sc, 'FFEEEEEE'); setFont(sc, { size:10, color:{argb:'FF789'} }); }
+        sc.alignment = { horizontal:'left', indent:1 };
+        [1,2,3,4,5,6].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // --- Section 5: Recommendations (prioritized) ---
+      const sec5 = ws3.addRow(['SECTION 5: PRIORITIZED RECOMMENDATIONS']);
+      ws3.mergeCells(sec5.number, 1, sec5.number, TA_COLS); sec5.height = 20;
+      sec5.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec5.getCell(1), DARK); sec5.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec5Hdr = ws3.addRow(['PRIORITY','AREA','FINDING','RECOMMENDATION','','','OWNER']);
+      sec5Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const recs = [];
+      // P1: Declining stores
+      storeRows.filter(s => s.verdict.startsWith('DECLINING')).forEach(s => recs.push({ p:'P1 - HIGH', area:'Store', finding: s.st+' trending DOWN ('+s.ww+' pts WoW, slope '+s.sl.toFixed(2)+')', rec:'Immediate root-cause review with Store Manager. Verify replenishment order cycle, delivery arrival vs schedule, and shelf-fill process.', own:'Area Manager + Store Manager' }));
+      // P1: Pareto top 3
+      paretoList.slice(0,3).forEach(p => recs.push({ p:'P1 - HIGH', area:'Pareto', finding: p.label+' accounts for '+Math.round((p.oos/totalOOS)*100)+'% of total OOS incidents', rec:'Prioritize buffer stock lift and supplier reliability review for this store-category pairing.', own:'Category Buyer + Area Manager' }));
+      // P2: Declining categories
+      CATS_T.forEach(cat => {
+        const perWeek = weeks.map((w,wi) => { const vals = Object.keys(storeCatWeek).map(st => storeCatWeek[st][cat][wi]).filter(x => x !== null); return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null; });
+        const sl = slope(perWeek);
+        if (sl !== null && sl < -1.5) recs.push({ p:'P2 - MED', area:'Category', finding: cat+' category trending DOWN (slope '+sl.toFixed(2)+' pts/wk) across all stores', rec:'Supplier scorecard review for '+cat+'. Verify fill-rate SLA, delivery frequency and demand-forecast accuracy.', own:'Category Buyer' });
+      });
+      // P2: Volatile categories
+      CATS_T.forEach(cat => {
+        const perWeek = weeks.map((w,wi) => { const vals = Object.keys(storeCatWeek).map(st => storeCatWeek[st][cat][wi]).filter(x => x !== null); return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null; });
+        const sd = stddev(perWeek);
+        if (sd !== null && sd > 10) recs.push({ p:'P2 - MED', area:'Category', finding: cat+' is VOLATILE (SD '+sd.toFixed(1)+' pts) - inconsistent availability', rec:'Standardize safety stock. Investigate week-of-month demand peaks and supplier lead-time variance.', own:'Category Buyer + Supply Planner' });
+      });
+      // P3: Below 95% target but stable
+      storeRows.filter(s => s.verdict.startsWith('STABLE') && s.latest !== null && s.latest < 95).slice(0, 5).forEach(s => recs.push({ p:'P3 - LOW', area:'Store', finding: s.st+' stable at '+s.latest+'% - below 95% target', rec:'Incremental improvement: review top 5 OOS SKUs; adjust min/max par stock. Monitor WoW.', own:'Area Manager' }));
+      // P3: Outliers above (benchmark)
+      storeRows.filter(s => s.avg !== null && ucl !== null && s.avg > ucl).forEach(s => recs.push({ p:'INFO', area:'Benchmark', finding: s.st+' is a positive outlier ('+Math.round(s.avg)+'% vs mean '+Math.round(meanAll)+'%)', rec:'Document and replicate winning practices (ordering cadence, team routines) to peer stores.', own:'Regional Manager' }));
+      // If no recs
+      if (!recs.length) recs.push({ p:'INFO', area:'Overall', finding:'No critical issues detected in this period.', rec:'Maintain current cadence. Review again next cycle.', own:'Regional Manager' });
+      recs.forEach(r => {
+        const row = ws3.addRow([r.p, r.area, r.finding, r.rec, '', '', r.own]);
+        ws3.mergeCells(row.number, 4, row.number, 6);
+        const pcolor = r.p.startsWith('P1') ? RED : r.p.startsWith('P2') ? AMBER : r.p.startsWith('P3') ? LIGHT : 'FFEEEEEE';
+        const pfont = r.p.startsWith('INFO') ? '#789' : WHITE;
+        setFill(row.getCell(1), pcolor); setFont(row.getCell(1), { bold:true, color:{argb: r.p.startsWith('INFO') ? 'FF789' : WHITE }, size:10 }); row.getCell(1).alignment = { horizontal:'center', vertical:'middle' };
+        setFill(row.getCell(2), YELLOW); setFont(row.getCell(2), { bold:true, size:10 }); row.getCell(2).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+        row.getCell(3).font = { size:10 }; row.getCell(3).alignment = { horizontal:'left', vertical:'middle', wrapText:true, indent:1 };
+        row.getCell(4).font = { size:10 }; row.getCell(4).alignment = { horizontal:'left', vertical:'middle', wrapText:true, indent:1 };
+        row.getCell(7).font = { size:10, italic:true, color:{argb:'FF556'} }; row.getCell(7).alignment = { horizontal:'left', vertical:'middle', wrapText:true, indent:1 };
+        row.height = 36;
+        [1,2,3,4,7].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // --- Section 6: Detailed Key Insight (date-range aware narrative) ---
+      const sec6 = ws3.addRow(['SECTION 6: DETAILED KEY INSIGHT ('+monthLbl+')']);
+      ws3.mergeCells(sec6.number, 1, sec6.number, TA_COLS); sec6.height = 20;
+      sec6.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec6.getCell(1), DARK); sec6.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      // Build narrative
+      const overallAvg = storeAvgPct.length ? Math.round(storeAvgPct.reduce((n,v)=>n+v,0)/storeAvgPct.length) : null;
+      const bestStore = storeRows[storeRows.length-1];
+      const worstStore = storeRows[0];
+      // Overall trend across weeks
+      const overallWeek = weeks.map((w,wi) => {
+        const vals = Object.keys(storeCatWeek).flatMap(st => CATS_T.map(c => storeCatWeek[st][c][wi])).filter(x => x !== null);
+        return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null;
+      });
+      const trendSl = slope(overallWeek);
+      const trendWoW = wow(overallWeek);
+      const narrative = [];
+      narrative.push(['Period summary', 'Across '+weeks.length+' weeks and '+storeRows.length+' store(s), average OSA = '+(overallAvg===null?'-':overallAvg+'%')+' (target 95%). '+(overallAvg===null?'':(overallAvg>=95?'ACHIEVED target.':'GAP of '+(95-overallAvg)+' pts to target.'))]);
+      if (trendSl !== null) narrative.push(['Direction of travel', (trendSl>0.5?'Improving':trendSl<-0.5?'Declining':'Flat')+' - slope '+trendSl.toFixed(2)+' pts/wk, WoW '+(trendWoW===null?'-':(trendWoW>0?'+':'')+trendWoW+' pts.']);
+      if (bestStore && worstStore && bestStore.st !== worstStore.st) {
+        narrative.push(['Range', 'Best: '+bestStore.st+' at '+(bestStore.avg===null?'-':Math.round(bestStore.avg)+'%')+'. Worst: '+worstStore.st+' at '+(worstStore.avg===null?'-':Math.round(worstStore.avg)+'%')+'. Spread = '+((bestStore.avg||0)-(worstStore.avg||0)).toFixed(0)+' pts.']);
+      }
+      // Category pulse
+      const catSummary = CATS_T.map(cat => {
+        const perWeek = weeks.map((w,wi) => { const vals = Object.keys(storeCatWeek).map(st => storeCatWeek[st][cat][wi]).filter(x => x !== null); return vals.length ? Math.round(vals.reduce((n,v)=>n+v,0)/vals.length) : null; });
+        const a = avg(perWeek);
+        return { cat, pct: a===null ? null : Math.round(a) };
+      }).filter(x => x.pct !== null).sort((a,b) => a.pct - b.pct);
+      if (catSummary.length) {
+        narrative.push(['Category pulse', 'Weakest: '+catSummary[0].cat+' ('+catSummary[0].pct+'%). Strongest: '+catSummary[catSummary.length-1].cat+' ('+catSummary[catSummary.length-1].pct+'%).']);
+      }
+      // Risk concentration
+      if (paretoList.length) {
+        const top3Sum = paretoList.slice(0,3).reduce((n,p)=>n+p.oos,0);
+        narrative.push(['Risk concentration', 'Top 3 store-category pairs account for '+(totalOOS?Math.round((top3Sum/totalOOS)*100):0)+'% of all OOS incidents. Fixing these alone would materially move the metric.']);
+      }
+      // Recommendation summary
+      const p1Count = recs.filter(r => r.p.startsWith('P1')).length;
+      const p2Count = recs.filter(r => r.p.startsWith('P2')).length;
+      narrative.push(['Action load', p1Count+' P1 (high) and '+p2Count+' P2 (medium) actions identified. P1 items warrant intervention within this week.']);
+      narrative.push(['Next review', 'Re-run this report on the same date-range next week; track whether declining stores stabilize and P1 actions close out.']);
+      narrative.forEach(n => {
+        const row = ws3.addRow([n[0], n[1], '', '', '', '', '']);
+        ws3.mergeCells(row.number, 2, row.number, TA_COLS);
+        setFill(row.getCell(1), YELLOW); setFont(row.getCell(1), { bold:true, size:10 }); row.getCell(1).alignment = { horizontal:'left', vertical:'top', indent:1, wrapText:true };
+        row.getCell(2).font = { size:11 }; row.getCell(2).alignment = { horizontal:'left', vertical:'top', wrapText:true, indent:1 };
+        row.getCell(1).border = thinBorder; row.getCell(2).border = thinBorder;
+        row.height = 42;
+      });
+
+      // Methodology footer
+      ws3.addRow([]);
+      const foot = ws3.addRow(['METHODOLOGY NOTES: WoW delta = Week N - Week N-1. Slope = linear regression over weekly means (pts/week). SD = standard deviation across weeks. SPC control limits = mean +/- 2sd (approx 95% confidence). Pareto = cumulative share of total OOS incidents. Target benchmark = 95% OSA.']);
+      ws3.mergeCells(foot.number, 1, foot.number, TA_COLS);
+      foot.getCell(1).font = { italic:true, size:9, color:{argb:'FF789'} };
+      foot.getCell(1).alignment = { horizontal:'left', vertical:'top', wrapText:true, indent:1 };
+      foot.height = 32;
+    }
 
     // Save
     const buf = await wb.xlsx.writeBuffer();
@@ -5455,7 +5751,8 @@ async function loadStockTabRM(){
   $('#osaExport').onclick = () => exportOSAExcel({
     from: $('#osaFrom').value, to: $('#osaTo').value,
     area: $('#osaArea').value, store: $('#osaStore').value, assigned: osaAssigned,
-    preparedBy: nameOf(S.manager) || S.manager || ''
+    preparedBy: nameOf(S.manager) || S.manager || '',
+    isRegional: (S.level||'').toLowerCase() === 'regional manager'
   });
   runOSA();
 

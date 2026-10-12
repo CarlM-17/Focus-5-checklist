@@ -4469,7 +4469,12 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     const sliceNames = Object.keys(bySliceCat).sort();
     const CATS = ['POULTRY','EGGS','MEAT','RICE','SUGAR'];
 
-    // --- Per-store per-category SKU detail ---
+    // --- Per-store per-category SKU detail (with weekly breakdown) ---
+    const weekOfDate = (dateStr) => {
+      const dt = new Date(dateStr + 'T00:00:00');
+      dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+      return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+    };
     const bystore = {};
     (detRes.entries||[]).forEach(e => {
       const s = e.store, g = e.group;
@@ -4477,9 +4482,13 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
       bystore[s] = bystore[s] || {};
       bystore[s][g] = bystore[s][g] || {};
       const key = (e.sku||'')+'||'+(e.description||'');
-      const b = bystore[s][g][key] = bystore[s][g][key] || { sku:e.sku, description:e.description, rank:e.rank, available:0, total:0 };
+      const b = bystore[s][g][key] = bystore[s][g][key] || { sku:e.sku, description:e.description, rank:e.rank, available:0, total:0, weekly:{} };
       b.total++;
       if (e.status === 'Available') b.available++;
+      const wk = weekOfDate(e.date);
+      const wb = b.weekly[wk] = b.weekly[wk] || { available:0, total:0 };
+      wb.total++;
+      if (e.status === 'Available') wb.available++;
     });
     const catTotals = {};
     CATS.forEach(c => catTotals[c] = { available:0, total:0 });
@@ -4579,52 +4588,82 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     });
     addRow([]);
 
-    // ===== PER-STORE DETAIL (collapsible by category via outlineLevel) =====
-    const detHdr = addRow(['PER STORE MONITORING - DETAILED SKU DATA (click +/- in the left margin to expand per store/category)']);
-    ws.mergeCells(detHdr.number, 1, detHdr.number, 5);
+    // ===== PER-STORE DETAIL (weekly SKU breakdown; categories expanded by default, SKUs collapsed) =====
+    const detTotalCols = 2 + weeks.length + 1; // SKU + Desc + weeks + Overall
+    const detHdr = addRow(['PER STORE MONITORING - DETAILED SKU DATA (click + to drill into SKUs per category)']);
+    ws.mergeCells(detHdr.number, 1, detHdr.number, detTotalCols);
     detHdr.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(detHdr.getCell(1), DARK); setAlign(detHdr.getCell(1), 'left');
     detHdr.height = 20;
-    const detColHdr = addRow(['SKU CODE','SKU DESCRIPTION','# ON SHELF','# CHECKED','% OSA']);
-    detColHdr.eachCell(c => { setFill(c, DARK); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
-    ws.getColumn(1).width = 24;
-    ws.getColumn(2).width = 45;
-    ws.getColumn(3).width = 13;
-    ws.getColumn(4).width = 13;
-    ws.getColumn(5).width = 11;
+    const detHdrCells = ['SKU CODE','SKU DESCRIPTION'].concat(weeks.map((w,i)=>'WEEK '+(i+1))).concat(['OVERALL']);
+    const detColHdr = addRow(detHdrCells);
+    detColHdr.eachCell((c, idx) => {
+      const isWeek = idx > 2 && idx <= 2 + weeks.length;
+      setFill(c, isWeek ? LIGHT : DARK); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder;
+    });
+    // Sub-header with date ranges for weeks
+    const detSubHdr = addRow(['', ''].concat(weeks.map(w => weekRange(w))).concat(['']));
+    weeks.forEach((w,i) => { const c = detSubHdr.getCell(i+3); setFont(c, { size:9, italic:true, color:{argb:WHITE} }); setFill(c, LIGHT); setAlign(c); c.border = thinBorder; });
+    ws.getColumn(1).width = 20;
+    ws.getColumn(2).width = 42;
+    for (let i=3; i<=2+weeks.length; i++) ws.getColumn(i).width = 11;
+    ws.getColumn(detTotalCols).width = 11;
+
     Object.keys(bystore).sort().forEach(st => {
+      // Compute store-overall per week + overall
+      const stWeekly = weeks.map(() => ({ available:0, total:0 }));
       let gTot=0, gAvail=0;
-      CATS.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { gTot+=k.total; gAvail+=k.available; }); });
+      CATS.forEach(cat => {
+        if (!bystore[st][cat]) return;
+        Object.values(bystore[st][cat]).forEach(k => {
+          gTot+=k.total; gAvail+=k.available;
+          weeks.forEach((w,wi) => { const wb = k.weekly[w]; if (wb) { stWeekly[wi].available += wb.available; stWeekly[wi].total += wb.total; } });
+        });
+      });
+      const stWeeklyPct = stWeekly.map(w => w.total ? Math.round((w.available/w.total)*100) : null);
       const gPct = gTot ? Math.round((gAvail/gTot)*100) : null;
+
       // Store banner row (outline 0)
-      const stRow = addRow(['STORE: '+st, '', '', 'OVERALL', gPct===null?'-':gPct+'%']);
-      ws.mergeCells(stRow.number, 1, stRow.number, 3);
-      stRow.height = 20;
-      [1,2,3,4].forEach(i => { setFill(stRow.getCell(i), DARK); setFont(stRow.getCell(i), { bold:true, color:{argb:WHITE}, size:12 }); });
-      stRow.getCell(1).alignment = { horizontal:'left', vertical:'middle' };
-      setFill(stRow.getCell(5), bandFill(gPct)); setFont(stRow.getCell(5), { bold:true, color:{argb:bandFont(gPct)} }); setAlign(stRow.getCell(5));
+      const stRow = addRow(['STORE: '+st, ''].concat(stWeeklyPct.map(p=>p===null?'-':p+'%')).concat([gPct===null?'-':gPct+'%']));
+      ws.mergeCells(stRow.number, 1, stRow.number, 2);
+      stRow.height = 22;
+      setFill(stRow.getCell(1), DARK); setFont(stRow.getCell(1), { bold:true, color:{argb:WHITE}, size:12 });
+      stRow.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      stWeeklyPct.forEach((p,i) => { const c = stRow.getCell(i+3); setFill(c, bandFill(p)); setFont(c, { bold:true, color:{argb:bandFont(p)} }); setAlign(c); c.border = thinBorder; });
+      const stOverallCell = stRow.getCell(detTotalCols); setFill(stOverallCell, bandFill(gPct)); setFont(stOverallCell, { bold:true, color:{argb:bandFont(gPct)} }); setAlign(stOverallCell); stOverallCell.border = thinBorder;
+
       CATS.forEach(cat => {
         const skus = bystore[st][cat] ? Object.values(bystore[st][cat]).sort((a,b)=> a.rank-b.rank || String(a.sku).localeCompare(String(b.sku))) : [];
         if (!skus.length) return;
-        const sumAvail = skus.reduce((n,k)=>n+k.available,0);
-        const sumTotal = skus.reduce((n,k)=>n+k.total,0);
-        const sumPct = sumTotal ? Math.round((sumAvail/sumTotal)*100) : null;
-        // Category header row (outline 1): visible when store expanded
-        const catRow = addRow([cat+' SUBTOTAL','', sumAvail, sumTotal, sumPct===null?'-':sumPct+'%']);
+        // Compute weekly subtotals for category
+        const catWeekly = weeks.map(() => ({ available:0, total:0 }));
+        let catTot=0, catAvail=0;
+        skus.forEach(k => {
+          catTot += k.total; catAvail += k.available;
+          weeks.forEach((w,wi) => { const wb = k.weekly[w]; if (wb) { catWeekly[wi].available += wb.available; catWeekly[wi].total += wb.total; } });
+        });
+        const catWeeklyPct = catWeekly.map(w => w.total ? Math.round((w.available/w.total)*100) : null);
+        const catPct = catTot ? Math.round((catAvail/catTot)*100) : null;
+        // Category subtotal row (outline 1): visible by default
+        const catRow = addRow([cat+' SUBTOTAL',''].concat(catWeeklyPct.map(p=>p===null?'-':p+'%')).concat([catPct===null?'-':catPct+'%']));
         catRow.outlineLevel = 1;
         catRow.height = 18;
-        [1,2,3,4].forEach(i => { setFill(catRow.getCell(i), LIGHT); setFont(catRow.getCell(i), { bold:true, color:{argb:WHITE} }); });
-        catRow.getCell(1).alignment = { horizontal:'left', vertical:'middle' };
-        [3,4].forEach(i => catRow.getCell(i).alignment = { horizontal:'center', vertical:'middle' });
-        setFill(catRow.getCell(5), bandFill(sumPct)); setFont(catRow.getCell(5), { bold:true, color:{argb:bandFont(sumPct)} }); setAlign(catRow.getCell(5));
+        ws.mergeCells(catRow.number, 1, catRow.number, 2);
+        setFill(catRow.getCell(1), LIGHT); setFont(catRow.getCell(1), { bold:true, color:{argb:WHITE} });
+        catRow.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:2 };
+        catWeeklyPct.forEach((p,i) => { const c = catRow.getCell(i+3); setFill(c, bandFill(p)); setFont(c, { bold:true, color:{argb:bandFont(p)} }); setAlign(c); c.border = thinBorder; });
+        const catOverallCell = catRow.getCell(detTotalCols); setFill(catOverallCell, bandFill(catPct)); setFont(catOverallCell, { bold:true, color:{argb:bandFont(catPct)} }); setAlign(catOverallCell); catOverallCell.border = thinBorder;
+        // SKU rows (outline 2, hidden by default)
         skus.forEach(k => {
-          const pct = k.total ? Math.round((k.available/k.total)*100) : null;
-          const skuRow = addRow([k.sku, k.description, k.available, k.total, pct===null?'-':pct+'%']);
-          skuRow.outlineLevel = 2;  // SKU rows collapsed under category
+          const weeklyPct = weeks.map(w => { const wb = k.weekly[w]; return (wb && wb.total) ? Math.round((wb.available/wb.total)*100) : null; });
+          const overallPct = k.total ? Math.round((k.available/k.total)*100) : null;
+          const skuRow = addRow([k.sku, k.description].concat(weeklyPct.map(p=>p===null?'-':p+'%')).concat([overallPct===null?'-':overallPct+'%']));
+          skuRow.outlineLevel = 2;
+          skuRow.hidden = true;  // collapsed by default
           skuRow.getCell(1).font = { name:'Consolas', size:10 };
           skuRow.getCell(2).font = { size:10 };
-          [3,4].forEach(i => skuRow.getCell(i).alignment = { horizontal:'center', vertical:'middle' });
-          setFill(skuRow.getCell(5), bandFill(pct)); setFont(skuRow.getCell(5), { bold:true, color:{argb:bandFont(pct)} }); setAlign(skuRow.getCell(5));
-          [1,2,3,4,5].forEach(i => skuRow.getCell(i).border = thinBorder);
+          weeklyPct.forEach((p,i) => { const c = skuRow.getCell(i+3); setFill(c, bandFill(p)); setFont(c, { bold:true, color:{argb:bandFont(p)}, size:10 }); setAlign(c); c.border = thinBorder; });
+          const skuOverallCell = skuRow.getCell(detTotalCols); setFill(skuOverallCell, bandFill(overallPct)); setFont(skuOverallCell, { bold:true, color:{argb:bandFont(overallPct)}, size:10 }); setAlign(skuOverallCell); skuOverallCell.border = thinBorder;
+          [1,2].forEach(i => skuRow.getCell(i).border = thinBorder);
         });
       });
       addRow([]); // spacer row between stores
@@ -4724,15 +4763,18 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
         [1,2,colCount2-1,colCount2].forEach(i => { setFill(slotRow.getCell(i), DARK); setFont(slotRow.getCell(i), { bold:true, color:{argb:WHITE} }); setAlign(slotRow.getCell(i)); slotRow.getCell(i).border = thinBorder; });
         for (let i=0; i<dayList.length*2; i++) { const c = slotRow.getCell(3+i); setFill(c, LGREY); setFont(c, { bold:true, size:9 }); setAlign(c); c.border = thinBorder; }
 
-        // SKU rows
+        // SKU rows + accumulate per-slot aggregates for category summary
+        const slotMonitored = Array(dayList.length*2).fill(0); // # of SKUs that had a check that slot
+        const slotAvailable = Array(dayList.length*2).fill(0); // # of SKUs that were Available that slot
         skus.forEach(k => {
           let onShelf = 0, checks = 0;
           const vals = [];
-          dayList.forEach(d => {
+          dayList.forEach((d, di) => {
             const dayData = k.days[d.date] || {};
-            ['AM','PM'].forEach(slot => {
-              if (dayData[slot] === 1) { vals.push(1); onShelf++; checks++; }
-              else if (dayData[slot] === 0) { vals.push(0); checks++; }
+            ['AM','PM'].forEach((slot, si) => {
+              const col = di*2 + si;
+              if (dayData[slot] === 1) { vals.push(1); onShelf++; checks++; slotMonitored[col]++; slotAvailable[col]++; }
+              else if (dayData[slot] === 0) { vals.push(0); checks++; slotMonitored[col]++; }
               else vals.push('-');
             });
           });
@@ -4753,6 +4795,34 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
           const pctCell = row.getCell(colCount2); setFill(pctCell, bandFill(pct)); setFont(pctCell, { bold:true, color:{argb:bandFont(pct)}, size:10 }); setAlign(pctCell); pctCell.border = thinBorder;
           [1,2].forEach(i => row.getCell(i).border = thinBorder);
         });
+
+        // ===== Category per-slot summary rows (3 rows) =====
+        const totMon = slotMonitored.reduce((n,v)=>n+v,0);
+        const totAvail = slotAvailable.reduce((n,v)=>n+v,0);
+        const totPct = totMon ? Math.round((totAvail/totMon)*100) : null;
+        // Row 1: TOTAL # OF SKUS MONITORED
+        const totMonRow = ws2.addRow(['','TOTAL # OF SKUS MONITORED'].concat(slotMonitored).concat([totMon,'']));
+        ws2.mergeCells(totMonRow.number, 1, totMonRow.number, 2);
+        [1].forEach(i => { setFill(totMonRow.getCell(i), YELLOW); setFont(totMonRow.getCell(i), { bold:true, size:11 }); totMonRow.getCell(i).alignment = { horizontal:'right', vertical:'middle', indent:1 }; totMonRow.getCell(i).border = thinBorder; });
+        slotMonitored.forEach((v,i) => { const c = totMonRow.getCell(3+i); setFill(c, YELLOW); setFont(c, { bold:true, size:10 }); setAlign(c); c.border = thinBorder; });
+        const monTotCell = totMonRow.getCell(colCount2-1); setFill(monTotCell, YELLOW); setFont(monTotCell, { bold:true }); setAlign(monTotCell); monTotCell.border = thinBorder;
+        setFill(totMonRow.getCell(colCount2), YELLOW); totMonRow.getCell(colCount2).border = thinBorder;
+        // Row 2: # OF SKUS AVAILABLE ON SHELF
+        const availRow = ws2.addRow(['','# OF SKUS AVAILABLE ON SHELF'].concat(slotAvailable).concat([totAvail,'']));
+        ws2.mergeCells(availRow.number, 1, availRow.number, 2);
+        [1].forEach(i => { setFill(availRow.getCell(i), YELLOW); setFont(availRow.getCell(i), { bold:true, size:11 }); availRow.getCell(i).alignment = { horizontal:'right', vertical:'middle', indent:1 }; availRow.getCell(i).border = thinBorder; });
+        slotAvailable.forEach((v,i) => { const c = availRow.getCell(3+i); setFill(c, YELLOW); setFont(c, { bold:true, size:10 }); setAlign(c); c.border = thinBorder; });
+        const avTotCell = availRow.getCell(colCount2-1); setFill(avTotCell, YELLOW); setFont(avTotCell, { bold:true }); setAlign(avTotCell); avTotCell.border = thinBorder;
+        setFill(availRow.getCell(colCount2), YELLOW); availRow.getCell(colCount2).border = thinBorder;
+        // Row 3: % ON SHELF AVAILABILITY (per slot)
+        const slotPct = slotMonitored.map((m,i) => m ? Math.round((slotAvailable[i]/m)*100) : null);
+        const pctRow = ws2.addRow(['','% ON SHELF AVAILABILITY'].concat(slotPct.map(p=>p===null?'-':p+'%')).concat(['', totPct===null?'-':totPct+'%']));
+        ws2.mergeCells(pctRow.number, 1, pctRow.number, 2);
+        [1].forEach(i => { setFill(pctRow.getCell(i), YELLOW); setFont(pctRow.getCell(i), { bold:true, size:11 }); pctRow.getCell(i).alignment = { horizontal:'right', vertical:'middle', indent:1 }; pctRow.getCell(i).border = thinBorder; });
+        slotPct.forEach((p,i) => { const c = pctRow.getCell(3+i); setFill(c, bandFill(p)); setFont(c, { bold:true, color:{argb:bandFont(p)}, size:10 }); setAlign(c); c.border = thinBorder; });
+        setFill(pctRow.getCell(colCount2-1), YELLOW); pctRow.getCell(colCount2-1).border = thinBorder;
+        const grandCell = pctRow.getCell(colCount2); setFill(grandCell, bandFill(totPct)); setFont(grandCell, { bold:true, color:{argb:bandFont(totPct)}, size:11 }); setAlign(grandCell); grandCell.border = thinBorder;
+        ws2.addRow([]);
       });
       ws2.addRow([]);
     });
@@ -5203,10 +5273,10 @@ async function loadStockTabRM(){
   const areasFromScope = [...new Set(rmRes.storeStats.map(s => s.area).filter(Boolean))].sort();
   const areaOpts = areasFromScope.map(a => '<option value="'+escapeHtml(a)+'">'+escapeHtml(a)+'</option>').join('');
   const storeOptsOSA = rmRes.storeStats.map(s => '<option value="'+escapeHtml(s.store)+'">'+escapeHtml(s.store)+'</option>').join('');
-  // Default: last 5 weeks (35 days)
+  // Default: current month (1st to today)
   const osaTo = todayStr();
-  const osaFromD = new Date(); osaFromD.setDate(osaFromD.getDate() - 34);
-  const osaFrom = osaFromD.getFullYear()+'-'+String(osaFromD.getMonth()+1).padStart(2,'0')+'-'+String(osaFromD.getDate()).padStart(2,'0');
+  const _now = new Date(); const _m1 = new Date(_now.getFullYear(), _now.getMonth(), 1);
+  const osaFrom = _m1.getFullYear()+'-'+String(_m1.getMonth()+1).padStart(2,'0')+'-'+String(_m1.getDate()).padStart(2,'0');
   const osaCard = \`<div class="card">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <h3 style="margin:0;color:#1f7a3a">On-Shelf Availability Monitoring</h3>
@@ -5439,8 +5509,8 @@ function renderReviewTab(){
   const amAreaOpts = amAreas.map(a => '<option value="'+escapeHtml(a)+'">'+escapeHtml(a)+'</option>').join('');
   const amStoreOpts = [...new Set(items.map(x => x.store))].sort().map(s => '<option value="'+escapeHtml(s)+'">'+escapeHtml(s)+'</option>').join('');
   const osaToAM = todayStr();
-  const osaFromDAM = new Date(); osaFromDAM.setDate(osaFromDAM.getDate() - 34);
-  const osaFromAM = osaFromDAM.getFullYear()+'-'+String(osaFromDAM.getMonth()+1).padStart(2,'0')+'-'+String(osaFromDAM.getDate()).padStart(2,'0');
+  const _nowAM = new Date(); const _m1AM = new Date(_nowAM.getFullYear(), _nowAM.getMonth(), 1);
+  const osaFromAM = _m1AM.getFullYear()+'-'+String(_m1AM.getMonth()+1).padStart(2,'0')+'-'+String(_m1AM.getDate()).padStart(2,'0');
   const osaCardAM = \`<div class="card">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <h3 style="margin:0;color:#1f7a3a">On-Shelf Availability Monitoring</h3>

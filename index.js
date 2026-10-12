@@ -1607,7 +1607,16 @@ app.get('/api/sku-availability', async (req, res) => {
         matrix.push({ slice: sl.name, sliceKey: sl.key, category: cat, weekly, avg });
       });
     });
-    res.json({ ok:true, weeks, slices, categories, matrix });
+    // Scope info for export title: region (most common) + list of areas in scope
+    const regionCount = {}; const areaCount = {};
+    scopeKeys.forEach(sk => {
+      const m = storeMeta[sk]; if (!m) return;
+      if (m.region) regionCount[m.region] = (regionCount[m.region]||0)+1;
+      if (m.area)   areaCount[m.area]     = (areaCount[m.area]||0)+1;
+    });
+    const topRegion = Object.keys(regionCount).sort((a,b)=>regionCount[b]-regionCount[a])[0] || '';
+    const areasInScope = Object.keys(areaCount).sort();
+    res.json({ ok:true, weeks, slices, categories, matrix, scope:{ region: topRegion, areas: areasInScope, areaFilter: req.query.area || '', storeFilter: req.query.store || '' } });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
@@ -4512,7 +4521,15 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     const mergeRow = (row, span) => ws.mergeCells(row.number, 1, row.number, span);
 
     // ===== TITLE =====
-    const r1 = addRow(['FRESH ON-SHELF AVAILABILITY MONITORING']);
+    // Build dynamic scope-aware title
+    const scope = availRes.scope || {};
+    let scopeLabel = '';
+    if (store) scopeLabel = store + ' Store';
+    else if (area) scopeLabel = area + ' Area';
+    else if (scope.areas && scope.areas.length === 1) scopeLabel = scope.areas[0] + ' Area';
+    else if (scope.region) scopeLabel = scope.region + ' Region';
+    const titleTxt = (scopeLabel ? scopeLabel + ' ' : '') + 'Fresh On-Shelf Availability Monitoring';
+    const r1 = addRow([titleTxt.toUpperCase()]);
     mergeRow(r1, totalCols);
     r1.height = 26;
     r1.getCell(1).font = { name:'Calibri', size:16, bold:true, color:{argb:WHITE} };
@@ -4522,7 +4539,8 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     mergeRow(r2, totalCols); setFont(r2.getCell(1), { size:10, italic:true }); r2.getCell(1).alignment = { horizontal:'center' }; r2.height = 18;
     addRow([]);
 
-    // ===== WEEKLY TREND BY CATEGORY (with OVERALL last column) =====
+    // ===== WEEKLY TREND BY CATEGORY (with OVERALL last column) + KEY INSIGHT panel to the right =====
+    const trendStartRow = ws.rowCount + 1;
     if (weeks.length) {
       const trHdr = addRow(['WEEKLY TREND - % OSA BY CATEGORY']);
       ws.mergeCells(trHdr.number, 1, trHdr.number, weeks.length+2);
@@ -4552,6 +4570,102 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
         vals.forEach((v,i) => { const c = row.getCell(i+2); setFill(c, bandFill(v)); setFont(c, { bold:true, color:{argb:bandFont(v)} }); setAlign(c); });
         const oc = row.getCell(weeks.length+2); setFill(oc, bandFill(overall)); setFont(oc, { bold:true, color:{argb:bandFont(overall)}, size:12 }); setAlign(oc);
       });
+
+      // ----- Build Key Insight text from the data -----
+      const insight = (() => {
+        // Overall OSA across all stores+cats
+        let gAvail=0, gTot=0;
+        const catAgg = {}; CATS.forEach(c => catAgg[c] = { a:0, t:0 });
+        const storeAgg = {};
+        Object.keys(bystore).forEach(st => {
+          storeAgg[st] = { a:0, t:0 };
+          CATS.forEach(cat => {
+            if (!bystore[st][cat]) return;
+            Object.values(bystore[st][cat]).forEach(k => {
+              gAvail += k.available; gTot += k.total;
+              catAgg[cat].a += k.available; catAgg[cat].t += k.total;
+              storeAgg[st].a += k.available; storeAgg[st].t += k.total;
+            });
+          });
+        });
+        const overallPct = gTot ? Math.round((gAvail/gTot)*100) : null;
+        const catList = CATS.map(c => ({ c, pct: catAgg[c].t ? Math.round((catAgg[c].a/catAgg[c].t)*100) : null })).filter(x => x.pct !== null).sort((a,b) => a.pct - b.pct);
+        const storeList = Object.keys(storeAgg).map(s => ({ s, pct: storeAgg[s].t ? Math.round((storeAgg[s].a/storeAgg[s].t)*100) : null })).filter(x => x.pct !== null).sort((a,b) => a.pct - b.pct);
+        // Trend: compare first vs last week overall
+        let trendMsg = '';
+        if (weeks.length >= 2) {
+          const first = weeks[0], last = weeks[weeks.length-1];
+          let fA=0, fT=0, lA=0, lT=0;
+          Object.keys(bystore).forEach(st => CATS.forEach(cat => (bystore[st][cat] ? Object.values(bystore[st][cat]) : []).forEach(k => {
+            if (k.weekly[first]) { fA += k.weekly[first].available; fT += k.weekly[first].total; }
+            if (k.weekly[last])  { lA += k.weekly[last].available;  lT += k.weekly[last].total; }
+          })));
+          const fPct = fT ? Math.round((fA/fT)*100) : null, lPct = lT ? Math.round((lA/lT)*100) : null;
+          if (fPct !== null && lPct !== null) {
+            const diff = lPct - fPct;
+            trendMsg = diff > 2 ? ('Improving: +'+diff+' pts from Week 1 to Week '+weeks.length)
+              : diff < -2 ? ('Declining: '+diff+' pts from Week 1 to Week '+weeks.length)
+              : ('Stable: '+(diff>=0?'+':'')+diff+' pts across '+weeks.length+' weeks');
+          }
+        }
+        const bestCat = catList.length ? catList[catList.length-1] : null;
+        const worstCat = catList.length ? catList[0] : null;
+        const bestStore = storeList.length ? storeList[storeList.length-1] : null;
+        const worstStore = storeList.length ? storeList[0] : null;
+        const grade = overallPct===null?'N/A':(overallPct>=95?'Excellent':overallPct>=85?'Good':overallPct>=70?'Needs attention':'Critical');
+        const belowThreshold = storeList.filter(x => x.pct < 85).length;
+        const lines = [];
+        lines.push({ label:'Overall OSA', value: (overallPct===null?'-':overallPct+'%')+' ('+grade+')', pct: overallPct });
+        if (bestCat && worstCat && bestCat.c !== worstCat.c) {
+          lines.push({ label:'Best Category', value: bestCat.c + ' ('+bestCat.pct+'%)', pct: bestCat.pct });
+          lines.push({ label:'Worst Category', value: worstCat.c + ' ('+worstCat.pct+'%)', pct: worstCat.pct });
+        }
+        if (bestStore && worstStore && bestStore.s !== worstStore.s) {
+          lines.push({ label:'Top Store', value: bestStore.s + ' ('+bestStore.pct+'%)', pct: bestStore.pct });
+          lines.push({ label:'Lowest Store', value: worstStore.s + ' ('+worstStore.pct+'%)', pct: worstStore.pct });
+        }
+        if (trendMsg) lines.push({ label:'Trend', value: trendMsg, pct: null });
+        if (storeList.length) lines.push({ label:'Stores < 85%', value: belowThreshold+' of '+storeList.length+' need action', pct: belowThreshold === 0 ? 100 : (belowThreshold > storeList.length/3 ? 60 : 80) });
+        // Action line
+        if (worstCat && worstStore) lines.push({ label:'ACTION', value: 'Focus replenishment on '+worstCat.c+' (worst category) and '+worstStore.s+' (lowest store)', pct: null });
+        return lines;
+      })();
+
+      // Write Key Insight panel in columns starting at weeks.length + 4 (one blank col gap)
+      const insightStartCol = weeks.length + 4;
+      // Ensure columns are decent width for insight panel
+      ws.getColumn(insightStartCol).width = 20;
+      ws.getColumn(insightStartCol+1).width = 48;
+      // Panel header
+      const panelHdrRow = ws.getRow(trendStartRow);
+      panelHdrRow.getCell(insightStartCol).value = 'KEY INSIGHT - EXECUTIVE SUMMARY';
+      ws.mergeCells(trendStartRow, insightStartCol, trendStartRow, insightStartCol+1);
+      panelHdrRow.getCell(insightStartCol).font = { bold:true, color:{argb:WHITE}, size:12 };
+      setFill(panelHdrRow.getCell(insightStartCol), DARK);
+      panelHdrRow.getCell(insightStartCol).alignment = { horizontal:'center', vertical:'middle' };
+      panelHdrRow.getCell(insightStartCol).border = thinBorder;
+      // Insight rows
+      insight.forEach((ln, i) => {
+        const targetRow = ws.getRow(trendStartRow + 1 + i);
+        targetRow.getCell(insightStartCol).value = ln.label;
+        targetRow.getCell(insightStartCol+1).value = ln.value;
+        const isAction = ln.label === 'ACTION';
+        setFill(targetRow.getCell(insightStartCol), YELLOW);
+        targetRow.getCell(insightStartCol).font = { bold:true, size:10 };
+        targetRow.getCell(insightStartCol).alignment = { horizontal:'left', vertical:'middle', indent:1, wrapText:true };
+        targetRow.getCell(insightStartCol).border = thinBorder;
+        if (ln.pct !== null && !isAction) {
+          setFill(targetRow.getCell(insightStartCol+1), bandFill(ln.pct));
+          targetRow.getCell(insightStartCol+1).font = { bold:true, color:{argb:bandFont(ln.pct)}, size:11 };
+        } else {
+          setFill(targetRow.getCell(insightStartCol+1), isAction ? 'FFFFF3E0' : 'FFF9F9F9');
+          targetRow.getCell(insightStartCol+1).font = { bold:isAction, size:10, color:{argb: isAction?'FFB85C00':'FF333333'} };
+        }
+        targetRow.getCell(insightStartCol+1).alignment = { horizontal:'left', vertical:'middle', wrapText:true, indent:1 };
+        targetRow.getCell(insightStartCol+1).border = thinBorder;
+        targetRow.height = Math.max(targetRow.height || 18, isAction ? 32 : 20);
+      });
+
       addRow([]);
     }
 
@@ -4715,8 +4829,9 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
 
     const monthLblShort = (() => { const d1=new Date(from+'T00:00:00'); const M=['January','February','March','April','May','June','July','August','September','October','November','December']; return M[d1.getMonth()]; })();
 
-    // Title row
-    const t1 = ws2.addRow(['FRESH ON-SHELF AVAILABILITY - DAILY CHECKLIST DETAIL']);
+    // Title row (same scope-aware label as sheet 1)
+    const dailyTitle = (scopeLabel ? scopeLabel + ' ' : '') + 'Fresh On-Shelf Availability - Daily Checklist Detail';
+    const t1 = ws2.addRow([dailyTitle.toUpperCase()]);
     ws2.mergeCells(t1.number, 1, t1.number, colCount2);
     t1.height = 24; t1.getCell(1).font = { bold:true, color:{argb:WHITE}, size:14 }; setFill(t1.getCell(1), DARK); t1.getCell(1).alignment = { horizontal:'center', vertical:'middle' };
     const t2 = ws2.addRow(['Period: '+monthLbl+'   |   1 = Available, 0 = OOS, - = no check']);

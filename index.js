@@ -5199,7 +5199,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       const trendWoW = wow(overallWeek);
       const narrative = [];
       narrative.push(['Period summary', 'Across '+weeks.length+' weeks and '+storeRows.length+' store(s), average OSA = '+(overallAvg===null?'-':overallAvg+'%')+' (target 95%). '+(overallAvg===null?'':(overallAvg>=95?'ACHIEVED target.':'GAP of '+(95-overallAvg)+' pts to target.'))]);
-      if (trendSl !== null) narrative.push(['Direction of travel', (trendSl>0.5?'Improving':trendSl<-0.5?'Declining':'Flat')+' - slope '+trendSl.toFixed(2)+' pts/wk, WoW '+(trendWoW===null?'-':(trendWoW>0?'+':'')+trendWoW+' pts.']);
+      if (trendSl !== null) narrative.push(['Direction of travel', (trendSl>0.5?'Improving':trendSl<-0.5?'Declining':'Flat')+' - slope '+trendSl.toFixed(2)+' pts/wk, WoW '+(trendWoW===null?'-':((trendWoW>0?'+':'')+trendWoW+' pts.'))]);
       if (bestStore && worstStore && bestStore.st !== worstStore.st) {
         narrative.push(['Range', 'Best: '+bestStore.st+' at '+(bestStore.avg===null?'-':Math.round(bestStore.avg)+'%')+'. Worst: '+worstStore.st+' at '+(worstStore.avg===null?'-':Math.round(worstStore.avg)+'%')+'. Spread = '+((bestStore.avg||0)-(worstStore.avg||0)).toFixed(0)+' pts.']);
       }

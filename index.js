@@ -5231,9 +5231,214 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
         row.height = 42;
       });
 
+      // ================================================================
+      // ===== RETAIL-NATIVE METRICS (purpose-built for daily OSA) =====
+      // ================================================================
+      // Preprocess slot/day map: perStoreSlot[store][date][slot] = { total, available, oos, oosSkus: Set }
+      const perStoreSlot = {};
+      const skuDailyStatus = {}; // store|sku -> { description, group, dates:{YYYY-MM-DD: 'A'|'O'|'-' } } using worst of AM/PM (O if any OOS)
+      (detRes.entries||[]).forEach(e => {
+        if (!CATS.includes(e.group)) return;
+        perStoreSlot[e.store] = perStoreSlot[e.store] || {};
+        perStoreSlot[e.store][e.date] = perStoreSlot[e.store][e.date] || {};
+        const sl = perStoreSlot[e.store][e.date][e.slot] = perStoreSlot[e.store][e.date][e.slot] || { total:0, available:0, oos:0, cats:{} };
+        sl.total++;
+        if (e.status === 'Available') sl.available++;
+        if (e.status === 'OOS') sl.oos++;
+        sl.cats[e.group] = sl.cats[e.group] || { total:0, available:0, oos:0 };
+        sl.cats[e.group].total++;
+        if (e.status === 'Available') sl.cats[e.group].available++;
+        if (e.status === 'OOS') sl.cats[e.group].oos++;
+
+        const skuKey = e.store+'||'+(e.sku||'')+'||'+(e.description||'');
+        const sd = skuDailyStatus[skuKey] = skuDailyStatus[skuKey] || { store:e.store, sku:e.sku, description:e.description, group:e.group, dates:{} };
+        const prev = sd.dates[e.date];
+        // If OOS anywhere in the day → O; else if any Available → A
+        if (e.status === 'OOS') sd.dates[e.date] = 'O';
+        else if (!prev && e.status === 'Available') sd.dates[e.date] = 'A';
+      });
+
+      // ===== Section 7: Fresh vs Ambient (separate targets) =====
+      const sec7 = ws3.addRow(['SECTION 7: FRESH vs AMBIENT - SEPARATE SERVICE-LEVEL TARGETS']);
+      ws3.mergeCells(sec7.number, 1, sec7.number, TA_COLS); sec7.height = 20;
+      sec7.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec7.getCell(1), DARK); sec7.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const freshCats = ['POULTRY','EGGS','MEAT'];
+      const ambientCats = ['RICE','SUGAR'];
+      const bucketStats = (catList) => {
+        let a=0, t=0;
+        Object.keys(bystore).forEach(st => catList.forEach(cat => { if (bystore[st][cat]) Object.values(bystore[st][cat]).forEach(k => { a+=k.available; t+=k.total; }); }));
+        return { a, t, pct: t ? Math.round((a/t)*100) : null };
+      };
+      const freshB = bucketStats(freshCats), ambB = bucketStats(ambientCats);
+      const sec7Hdr = ws3.addRow(['BUCKET','CATEGORIES','OSA %','TARGET','GAP vs TARGET','STATUS','']);
+      sec7Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      [
+        { name:'FRESH', cats:freshCats.join(' + '), b:freshB, target:92 },
+        { name:'AMBIENT', cats:ambientCats.join(' + '), b:ambB, target:97 }
+      ].forEach(b => {
+        const gap = b.b.pct === null ? null : b.b.pct - b.target;
+        const status = gap === null ? 'No data' : gap >= 0 ? 'ON / ABOVE TARGET' : gap >= -5 ? 'Near target' : 'BELOW TARGET';
+        const row = ws3.addRow([b.name, b.cats, b.b.pct===null?'-':b.b.pct+'%', b.target+'%', gap===null?'-':((gap>=0?'+':'')+gap+' pts'), status, '']);
+        row.getCell(1).font = { bold:true, size:11 }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        row.getCell(2).font = { size:10, color:{argb:'FF556'} }; row.getCell(2).alignment = { horizontal:'left', indent:1 };
+        const pctCell = row.getCell(3); setFill(pctCell, bandFill(b.b.pct)); setFont(pctCell, { bold:true, color:{argb:bandFont(b.b.pct)} }); setAlign(pctCell);
+        row.getCell(4).alignment = { horizontal:'center' }; row.getCell(4).font = { bold:true };
+        const gapCell = row.getCell(5);
+        if (gap !== null) { const bg = gap >= 0 ? DARK : gap >= -5 ? AMBER : RED; setFill(gapCell, bg); setFont(gapCell, { bold:true, color:{argb:WHITE} }); }
+        setAlign(gapCell);
+        const stCell = row.getCell(6);
+        if (gap !== null) { const bg = gap >= 0 ? DARK : gap >= -5 ? AMBER : RED; setFill(stCell, bg); setFont(stCell, { bold:true, color:{argb:WHITE}, size:10 }); } else { setFill(stCell, 'FFEEEEEE'); }
+        stCell.alignment = { horizontal:'left', indent:1 };
+        [1,2,3,4,5,6].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // ===== Section 8: AM vs PM Gap per Store/Category =====
+      const sec8 = ws3.addRow(['SECTION 8: AM vs PM GAP - REPLENISHMENT CYCLE DIAGNOSTIC']);
+      ws3.mergeCells(sec8.number, 1, sec8.number, TA_COLS); sec8.height = 20;
+      sec8.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec8.getCell(1), DARK); sec8.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec8Hdr = ws3.addRow(['STORE','CATEGORY','AM %','PM %','PM - AM','DIAGNOSIS','']);
+      sec8Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const amPmGaps = [];
+      // Compute AM% and PM% per store x category using perStoreSlot
+      Object.keys(perStoreSlot).forEach(st => {
+        CATS_T.forEach(cat => {
+          let amA=0, amT=0, pmA=0, pmT=0;
+          Object.values(perStoreSlot[st]).forEach(dayMap => {
+            if (dayMap.AM && dayMap.AM.cats[cat]) { amA += dayMap.AM.cats[cat].available; amT += dayMap.AM.cats[cat].total; }
+            if (dayMap.PM && dayMap.PM.cats[cat]) { pmA += dayMap.PM.cats[cat].available; pmT += dayMap.PM.cats[cat].total; }
+          });
+          if (!amT && !pmT) return;
+          const amPct = amT ? Math.round((amA/amT)*100) : null;
+          const pmPct = pmT ? Math.round((pmA/pmT)*100) : null;
+          if (amPct === null || pmPct === null) return;
+          const gap = pmPct - amPct;
+          amPmGaps.push({ st, cat, amPct, pmPct, gap });
+        });
+      });
+      // Keep only pairs with |gap| >= 5 to surface what matters
+      const notableGaps = amPmGaps.filter(g => Math.abs(g.gap) >= 5).sort((a,b) => Math.abs(b.gap) - Math.abs(a.gap)).slice(0, 20);
+      if (!notableGaps.length) {
+        const row = ws3.addRow(['-','All within +/-5 pts','','','','AM and PM are consistent','']);
+        row.getCell(2).alignment = { horizontal:'left', indent:1 }; row.getCell(6).alignment = { horizontal:'left', indent:1 };
+      } else notableGaps.forEach(g => {
+        const diag = g.gap < -10 ? 'RUNS DOWN midday - PM replenishment missing' : g.gap < -5 ? 'Mild midday drop - review PM shelf-fill' : g.gap > 10 ? 'AM fill too slow - start earlier or add staff' : 'AM shelf-fill incomplete at opening';
+        const row = ws3.addRow([g.st, g.cat, g.amPct+'%', g.pmPct+'%', (g.gap>0?'+':'')+g.gap+' pts', diag, '']);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        row.getCell(2).alignment = { horizontal:'left', indent:1 };
+        setFill(row.getCell(3), bandFill(g.amPct)); setFont(row.getCell(3), { bold:true, color:{argb:bandFont(g.amPct)} }); setAlign(row.getCell(3));
+        setFill(row.getCell(4), bandFill(g.pmPct)); setFont(row.getCell(4), { bold:true, color:{argb:bandFont(g.pmPct)} }); setAlign(row.getCell(4));
+        const gc = row.getCell(5); const bg = g.gap < -5 ? RED : g.gap > 5 ? AMBER : LIGHT; setFill(gc, bg); setFont(gc, { bold:true, color:{argb:WHITE} }); setAlign(gc);
+        const dc = row.getCell(6); setFill(dc, g.gap<-5?RED:(g.gap>5?AMBER:'FFEEEEEE')); setFont(dc, { bold:true, color:{argb: Math.abs(g.gap)>5?WHITE:'FF333333'}, size:10 }); dc.alignment = { horizontal:'left', vertical:'middle', indent:1, wrapText:true };
+        [1,2,3,4,5,6].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // ===== Section 9: Repeat Offender Score (longest consecutive-days OOS per SKU) =====
+      const sec9 = ws3.addRow(['SECTION 9: REPEAT OFFENDERS - LONGEST CONSECUTIVE-DAY OOS STREAK PER SKU']);
+      ws3.mergeCells(sec9.number, 1, sec9.number, TA_COLS); sec9.height = 20;
+      sec9.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec9.getCell(1), DARK); sec9.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec9Hdr = ws3.addRow(['STORE','CATEGORY','SKU','DESCRIPTION','LONGEST STREAK (days)','TOTAL OOS DAYS','']);
+      sec9Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      // Build sorted date list
+      const allDates = dayList.map(d => d.date);
+      const offenders = [];
+      Object.values(skuDailyStatus).forEach(sd => {
+        let longest = 0, cur = 0, totalOut = 0;
+        allDates.forEach(d => {
+          const s = sd.dates[d];
+          if (s === 'O') { cur++; totalOut++; if (cur > longest) longest = cur; }
+          else if (s === 'A') { cur = 0; }
+          // '-' = no check → don't break the streak but don't extend it either
+        });
+        if (longest >= 2 || totalOut >= 3) offenders.push({ ...sd, longest, totalOut });
+      });
+      offenders.sort((a,b) => b.longest - a.longest || b.totalOut - a.totalOut);
+      const topOff = offenders.slice(0, 20);
+      if (!topOff.length) {
+        const row = ws3.addRow(['-','-','-','No SKU was OOS for 2+ consecutive days','','','']);
+        row.getCell(4).alignment = { horizontal:'left', indent:1 };
+      } else topOff.forEach(o => {
+        const row = ws3.addRow([o.store, o.group, o.sku, o.description, o.longest+' days', o.totalOut+' days', '']);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        row.getCell(2).alignment = { horizontal:'left', indent:1 };
+        row.getCell(3).font = { name:'Consolas', size:10 }; row.getCell(3).alignment = { horizontal:'left' };
+        row.getCell(4).font = { size:10 }; row.getCell(4).alignment = { horizontal:'left', wrapText:true };
+        const streakCell = row.getCell(5);
+        const stBg = o.longest >= 7 ? RED : o.longest >= 4 ? AMBER : LIGHT;
+        setFill(streakCell, stBg); setFont(streakCell, { bold:true, color:{argb:WHITE} }); setAlign(streakCell);
+        row.getCell(6).alignment = { horizontal:'center' }; row.getCell(6).font = { bold:true };
+        [1,2,3,4,5,6].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // ===== Section 10: Rolling 7-day OSA (per store) =====
+      const sec10 = ws3.addRow(['SECTION 10: ROLLING 7-DAY OSA - RECENT MOMENTUM (smoother than WoW)']);
+      ws3.mergeCells(sec10.number, 1, sec10.number, TA_COLS); sec10.height = 20;
+      sec10.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec10.getCell(1), DARK); sec10.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec10Hdr = ws3.addRow(['STORE','LAST 7 DAYS %','PRIOR 7 DAYS %','MOMENTUM (delta)','DIRECTION','','']);
+      sec10Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const lastDate = allDates[allDates.length-1];
+      const last7Start = (() => { if (!lastDate) return null; const d = new Date(lastDate+'T00:00:00'); d.setDate(d.getDate()-6); return d.toISOString().slice(0,10); })();
+      const prior7End = (() => { if (!last7Start) return null; const d = new Date(last7Start+'T00:00:00'); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
+      const prior7Start = (() => { if (!prior7End) return null; const d = new Date(prior7End+'T00:00:00'); d.setDate(d.getDate()-6); return d.toISOString().slice(0,10); })();
+      const windowStats = (store, startD, endD) => {
+        let a=0, t=0;
+        if (!perStoreSlot[store]) return null;
+        Object.keys(perStoreSlot[store]).forEach(dt => {
+          if (dt < startD || dt > endD) return;
+          Object.values(perStoreSlot[store][dt]).forEach(sl => { a += sl.available; t += sl.total; });
+        });
+        return t ? Math.round((a/t)*100) : null;
+      };
+      const r7Rows = Object.keys(perStoreSlot).map(st => {
+        const l7 = last7Start ? windowStats(st, last7Start, lastDate) : null;
+        const p7 = (prior7Start && prior7End) ? windowStats(st, prior7Start, prior7End) : null;
+        const delta = (l7 !== null && p7 !== null) ? (l7 - p7) : null;
+        return { st, l7, p7, delta };
+      }).sort((a,b) => (a.l7||0) - (b.l7||0));
+      r7Rows.forEach(r => {
+        const dir = r.delta === null ? 'Baseline only' : r.delta >= 3 ? 'ACCELERATING UP' : r.delta >= 0 ? 'Slight improvement' : r.delta >= -3 ? 'Slight dip' : 'DETERIORATING';
+        const row = ws3.addRow([r.st, r.l7===null?'-':r.l7+'%', r.p7===null?'-':r.p7+'%', r.delta===null?'-':(r.delta>0?'+':'')+r.delta+' pts', dir, '', '']);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        setFill(row.getCell(2), bandFill(r.l7)); setFont(row.getCell(2), { bold:true, color:{argb:bandFont(r.l7)} }); setAlign(row.getCell(2));
+        setFill(row.getCell(3), bandFill(r.p7)); setFont(row.getCell(3), { bold:true, color:{argb:bandFont(r.p7)} }); setAlign(row.getCell(3));
+        const dc = row.getCell(4); if (r.delta !== null) { const bg = r.delta >= 3 ? DARK : r.delta >= 0 ? LIGHT : r.delta >= -3 ? AMBER : RED; setFill(dc, bg); setFont(dc, { bold:true, color:{argb:WHITE} }); } setAlign(dc);
+        const dirc = row.getCell(5); const dirBg = dir.startsWith('ACCELERATING') ? DARK : dir.startsWith('Slight improvement') ? LIGHT : dir.startsWith('Slight dip') ? AMBER : dir.startsWith('DETERIORATING') ? RED : 'FFEEEEEE';
+        setFill(dirc, dirBg); setFont(dirc, { bold:true, color:{argb: dirBg==='FFEEEEEE'?'FF333333':WHITE }, size:10 }); dirc.alignment = { horizontal:'left', vertical:'middle', indent:1 };
+        [1,2,3,4,5].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
+      // ===== Section 11: First-Time-Right (perfect-slot) rate =====
+      const sec11 = ws3.addRow(['SECTION 11: FIRST-TIME-RIGHT - % OF SLOT SUBMISSIONS AT 100% OSA']);
+      ws3.mergeCells(sec11.number, 1, sec11.number, TA_COLS); sec11.height = 20;
+      sec11.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec11.getCell(1), DARK); sec11.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+      const sec11Hdr = ws3.addRow(['STORE','PERFECT SLOTS','TOTAL SLOTS','FIRST-TIME-RIGHT %','GRADE','','']);
+      sec11Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      const ftrRows = Object.keys(perStoreSlot).map(st => {
+        let perfect = 0, totalSlots = 0;
+        Object.values(perStoreSlot[st]).forEach(dayMap => {
+          Object.values(dayMap).forEach(sl => { totalSlots++; if (sl.total > 0 && sl.oos === 0) perfect++; });
+        });
+        const pct = totalSlots ? Math.round((perfect/totalSlots)*100) : null;
+        return { st, perfect, totalSlots, pct };
+      }).sort((a,b) => (b.pct||0) - (a.pct||0));
+      ftrRows.forEach(r => {
+        const grade = r.pct === null ? 'N/A' : r.pct >= 80 ? 'A - excellent discipline' : r.pct >= 60 ? 'B - good, push for 80%' : r.pct >= 40 ? 'C - inconsistent, process review' : 'D - fire-fighting daily';
+        const row = ws3.addRow([r.st, r.perfect, r.totalSlots, r.pct===null?'-':r.pct+'%', grade, '', '']);
+        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
+        [2,3].forEach(i => { row.getCell(i).alignment = { horizontal:'center' }; row.getCell(i).font = { bold:true }; });
+        setFill(row.getCell(4), bandFill(r.pct)); setFont(row.getCell(4), { bold:true, color:{argb:bandFont(r.pct)} }); setAlign(row.getCell(4));
+        const gc = row.getCell(5); const gBg = grade.startsWith('A') ? DARK : grade.startsWith('B') ? LIGHT : grade.startsWith('C') ? AMBER : grade.startsWith('D') ? RED : 'FFEEEEEE';
+        setFill(gc, gBg); setFont(gc, { bold:true, color:{argb: gBg==='FFEEEEEE'?'FF333333':WHITE}, size:10 }); gc.alignment = { horizontal:'left', vertical:'middle', indent:1 };
+        [1,2,3,4,5].forEach(i => row.getCell(i).border = thinBorder);
+      });
+      ws3.addRow([]);
+
       // Methodology footer
       ws3.addRow([]);
-      const foot = ws3.addRow(['METHODOLOGY NOTES: WoW delta = Week N - Week N-1. Slope = linear regression over weekly means (pts/week). SD = standard deviation across weeks. SPC control limits = mean +/- 2sd (approx 95% confidence). Pareto = cumulative share of total OOS incidents. Target benchmark = 95% OSA.']);
+      const foot = ws3.addRow(['METHODOLOGY NOTES: Sections 1-6 (strategic analytics): WoW delta = Week N - Week N-1. Slope = linear regression over weekly means (pts/week). SD = standard deviation across weeks. SPC control limits = mean +/- 2sd (approx 95% confidence). Pareto = cumulative share of total OOS incidents. Target benchmark = 95% OSA. Sections 7-11 (retail-native daily metrics): Fresh target 92% (POULTRY/EGGS/MEAT - short shelf life), Ambient target 97% (RICE/SUGAR - long shelf life). AM/PM Gap > 5 pts suggests a replenishment-process issue not a supply issue. Repeat Offender streak counts consecutive calendar days a SKU was flagged OOS (any slot); 2+ day streak = systemic, not one-off. Rolling 7-day compares the last 7 calendar days vs the 7 before. First-Time-Right = % of slot submissions where all SKUs in that slot were Available (zero OOS).']);
       ws3.mergeCells(foot.number, 1, foot.number, TA_COLS);
       foot.getCell(1).font = { italic:true, size:9, color:{argb:'FF789'} };
       foot.getCell(1).alignment = { horizontal:'left', vertical:'top', wrapText:true, indent:1 };

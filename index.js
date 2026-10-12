@@ -4638,7 +4638,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
       ws.getColumn(insightStartCol+1).width = 48;
       // Panel header
       const panelHdrRow = ws.getRow(trendStartRow);
-      panelHdrRow.getCell(insightStartCol).value = 'KEY INSIGHT - EXECUTIVE SUMMARY';
+      panelHdrRow.getCell(insightStartCol).value = 'KEY INSIGHT';
       ws.mergeCells(trendStartRow, insightStartCol, trendStartRow, insightStartCol+1);
       panelHdrRow.getCell(insightStartCol).font = { bold:true, color:{argb:WHITE}, size:12 };
       setFill(panelHdrRow.getCell(insightStartCol), DARK);

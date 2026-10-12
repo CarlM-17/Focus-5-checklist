@@ -4644,6 +4644,121 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy }){
     sig.getCell(1).font = { bold:true, size:11 };
     sig.getCell(4).font = { bold:true, size:11 };
 
+    // ===== SHEET 2: DAILY DETAIL CHECKLIST (per store, per SKU, daily AM/PM 1/0) =====
+    // Build dayList (every calendar day between from..to)
+    const dayList = [];
+    {
+      const d1 = new Date(from+'T00:00:00'), d2 = new Date(to+'T00:00:00');
+      for (let d = new Date(d1); d <= d2; d.setDate(d.getDate()+1)) {
+        dayList.push({ date: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'),
+                       day: d.getDate(), month: d.getMonth()+1 });
+      }
+    }
+    // Build pivot: dailyMap[store][group][skuKey] = { sku, description, days:{ YYYY-MM-DD: { AM:'1'|'0', PM:'1'|'0' } } }
+    const dailyMap = {};
+    (detRes.entries||[]).forEach(e => {
+      if (!CATS.includes(e.group)) return;
+      dailyMap[e.store] = dailyMap[e.store] || {};
+      dailyMap[e.store][e.group] = dailyMap[e.store][e.group] || {};
+      const key = (e.sku||'')+'||'+(e.description||'');
+      const b = dailyMap[e.store][e.group][key] = dailyMap[e.store][e.group][key] || { sku:e.sku, description:e.description, rank:e.rank||0, days:{} };
+      b.days[e.date] = b.days[e.date] || {};
+      b.days[e.date][e.slot] = (e.status === 'Available') ? 1 : 0;
+    });
+
+    const ws2 = wb.addWorksheet('Daily Detail', { views:[{ showGridLines:false }] });
+    const colCount2 = 2 + dayList.length*2 + 2; // SKU CODE + DESC + days*(AM+PM) + # ON SHELF + % OSA
+    ws2.getColumn(1).width = 12;
+    ws2.getColumn(2).width = 38;
+    for (let i=3; i<=2+dayList.length*2; i++) ws2.getColumn(i).width = 5;
+    ws2.getColumn(colCount2-1).width = 12;
+    ws2.getColumn(colCount2).width = 10;
+
+    const monthLblShort = (() => { const d1=new Date(from+'T00:00:00'); const M=['January','February','March','April','May','June','July','August','September','October','November','December']; return M[d1.getMonth()]; })();
+
+    // Title row
+    const t1 = ws2.addRow(['FRESH ON-SHELF AVAILABILITY - DAILY CHECKLIST DETAIL']);
+    ws2.mergeCells(t1.number, 1, t1.number, colCount2);
+    t1.height = 24; t1.getCell(1).font = { bold:true, color:{argb:WHITE}, size:14 }; setFill(t1.getCell(1), DARK); t1.getCell(1).alignment = { horizontal:'center', vertical:'middle' };
+    const t2 = ws2.addRow(['Period: '+monthLbl+'   |   1 = Available, 0 = OOS, - = no check']);
+    ws2.mergeCells(t2.number, 1, t2.number, colCount2);
+    t2.getCell(1).font = { italic:true, size:10 }; t2.getCell(1).alignment = { horizontal:'center' };
+    ws2.addRow([]);
+
+    const sortedStores = Object.keys(dailyMap).sort();
+    sortedStores.forEach(st => {
+      // Store header
+      const sh = ws2.addRow(['STORE: '+st]);
+      ws2.mergeCells(sh.number, 1, sh.number, colCount2);
+      sh.height = 22; sh.getCell(1).font = { bold:true, color:{argb:WHITE}, size:13 }; setFill(sh.getCell(1), DARK); sh.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
+
+      CATS.forEach(cat => {
+        const skus = dailyMap[st][cat] ? Object.values(dailyMap[st][cat]).sort((a,b)=> (a.rank||0)-(b.rank||0) || String(a.sku).localeCompare(String(b.sku))) : [];
+        if (!skus.length) return;
+
+        // Category label row (red bold)
+        const catRow = ws2.addRow([cat]);
+        ws2.mergeCells(catRow.number, 1, catRow.number, colCount2);
+        catRow.height = 20; catRow.getCell(1).font = { bold:true, color:{argb:RED}, size:12, underline:true }; catRow.getCell(1).alignment = { horizontal:'left', indent:1 };
+
+        // Month-header row: SKU CODE | SKU DESCRIPTION | <month name spanning all days> | # ON SHELF | % OSA
+        const monthRow = ws2.addRow(['SKU CODE','SKU DESCRIPTION', monthLblShort].concat(Array(dayList.length*2 - 1).fill('')).concat(['# ON SHELF','% OSA']));
+        monthRow.getCell(1).value = 'SKU CODE'; monthRow.getCell(2).value = 'SKU DESCRIPTION';
+        [1,2].forEach(i => { setFill(monthRow.getCell(i), DARK); setFont(monthRow.getCell(i), { bold:true, color:{argb:WHITE} }); setAlign(monthRow.getCell(i)); monthRow.getCell(i).border = thinBorder; });
+        ws2.mergeCells(monthRow.number, 3, monthRow.number, 2 + dayList.length*2);
+        const mCell = monthRow.getCell(3); setFill(mCell, YELLOW); setFont(mCell, { bold:true, size:11 }); mCell.alignment = { horizontal:'center', vertical:'middle' }; mCell.border = thinBorder;
+        setFill(monthRow.getCell(colCount2-1), DARK); setFont(monthRow.getCell(colCount2-1), { bold:true, color:{argb:WHITE} }); setAlign(monthRow.getCell(colCount2-1)); monthRow.getCell(colCount2-1).border = thinBorder;
+        setFill(monthRow.getCell(colCount2), DARK); setFont(monthRow.getCell(colCount2), { bold:true, color:{argb:WHITE} }); setAlign(monthRow.getCell(colCount2)); monthRow.getCell(colCount2).border = thinBorder;
+
+        // Day-number header: 1 1 2 2 3 3 ... (merged pairs across day)
+        const dayRow = ws2.addRow(['', ''].concat(dayList.flatMap(d => [d.day, d.day])).concat(['', '']));
+        dayList.forEach((d, i) => {
+          const c1 = dayRow.getCell(3 + i*2);
+          const c2 = dayRow.getCell(3 + i*2 + 1);
+          ws2.mergeCells(dayRow.number, 3+i*2, dayRow.number, 3+i*2+1);
+          setFill(c1, YELLOW); setFont(c1, { bold:true, size:10 }); c1.alignment = { horizontal:'center', vertical:'middle' }; c1.border = thinBorder;
+        });
+
+        // AM/PM sub-header
+        const slotRow = ws2.addRow(['SKU CODE','SKU DESCRIPTION'].concat(dayList.flatMap(() => ['AM','PM'])).concat(['# ON SHELF','% OSA']));
+        [1,2,colCount2-1,colCount2].forEach(i => { setFill(slotRow.getCell(i), DARK); setFont(slotRow.getCell(i), { bold:true, color:{argb:WHITE} }); setAlign(slotRow.getCell(i)); slotRow.getCell(i).border = thinBorder; });
+        for (let i=0; i<dayList.length*2; i++) { const c = slotRow.getCell(3+i); setFill(c, LGREY); setFont(c, { bold:true, size:9 }); setAlign(c); c.border = thinBorder; }
+
+        // SKU rows
+        skus.forEach(k => {
+          let onShelf = 0, checks = 0;
+          const vals = [];
+          dayList.forEach(d => {
+            const dayData = k.days[d.date] || {};
+            ['AM','PM'].forEach(slot => {
+              if (dayData[slot] === 1) { vals.push(1); onShelf++; checks++; }
+              else if (dayData[slot] === 0) { vals.push(0); checks++; }
+              else vals.push('-');
+            });
+          });
+          const pct = checks ? Math.round((onShelf/checks)*100) : null;
+          const row = ws2.addRow([k.sku, k.description].concat(vals).concat([onShelf, pct===null?'-':pct+'%']));
+          row.getCell(1).font = { name:'Consolas', size:10 }; row.getCell(1).alignment = { horizontal:'left' };
+          row.getCell(2).font = { size:10 };
+          for (let i=0; i<vals.length; i++) {
+            const c = row.getCell(3+i);
+            c.alignment = { horizontal:'center', vertical:'middle' };
+            c.font = { size:9 };
+            if (vals[i] === 0) { setFill(c, 'FFFFE5E5'); setFont(c, { size:9, bold:true, color:{argb:RED} }); }
+            else if (vals[i] === 1) { setFont(c, { size:9, color:{argb:'FF333333'} }); }
+            else { setFont(c, { size:9, color:{argb:'FFBBBBBB'} }); }
+            c.border = thinBorder;
+          }
+          const osCell = row.getCell(colCount2-1); osCell.alignment = { horizontal:'center' }; osCell.font = { bold:true, size:10 }; osCell.border = thinBorder;
+          const pctCell = row.getCell(colCount2); setFill(pctCell, bandFill(pct)); setFont(pctCell, { bold:true, color:{argb:bandFont(pct)}, size:10 }); setAlign(pctCell); pctCell.border = thinBorder;
+          [1,2].forEach(i => row.getCell(i).border = thinBorder);
+        });
+      });
+      ws2.addRow([]);
+    });
+    // Freeze top-left (first 2 cols + the header rows)
+    ws2.views = [{ state:'frozen', xSplit:2, ySplit:3, showGridLines:false }];
+
     // Save
     const buf = await wb.xlsx.writeBuffer();
     const blob = new Blob([buf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

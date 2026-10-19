@@ -5192,35 +5192,14 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       });
       ws3.addRow([]);
 
-      // --- Section 4: SPC-style outliers (stores far from mean) ---
-      const sec4 = ws3.addRow(['SECTION 4: STATISTICAL OUTLIERS (SPC - control limits mean +/- 2 standard deviations)']);
-      ws3.mergeCells(sec4.number, 1, sec4.number, TA_COLS); sec4.height = 20;
-      sec4.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec4.getCell(1), DARK); sec4.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
-      const sec4Hdr = ws3.addRow(['STORE','OSA %','MEAN %','UPPER CTRL (+2sd)','LOWER CTRL (-2sd)','STATUS','']);
-      sec4Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
+      // Keep mean/ucl/lcl computations for use in Section 6 narrative + recommendations
       const storeAvgPct = storeRows.map(s => s.avg).filter(x => x !== null);
       const meanAll = storeAvgPct.length ? storeAvgPct.reduce((n,v)=>n+v,0)/storeAvgPct.length : null;
       const sdAll = storeAvgPct.length > 1 ? Math.sqrt(storeAvgPct.reduce((s,x)=>s+(x-meanAll)*(x-meanAll),0)/storeAvgPct.length) : null;
       const ucl = meanAll !== null && sdAll !== null ? Math.min(100, meanAll + 2*sdAll) : null;
-      const lcl = meanAll !== null && sdAll !== null ? Math.max(0, meanAll - 2*sdAll) : null;
-      storeRows.forEach(s => {
-        if (s.avg === null || meanAll === null) return;
-        const status = s.avg > ucl ? 'OUTLIER (above) - benchmark' : s.avg < lcl ? 'OUTLIER (below) - escalate' : 'In control';
-        const row = ws3.addRow([s.st, Math.round(s.avg)+'%', Math.round(meanAll)+'%', Math.round(ucl)+'%', Math.round(lcl)+'%', status, '']);
-        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
-        [2,3,4,5].forEach(i => { const c = row.getCell(i); setAlign(c); });
-        setFill(row.getCell(2), bandFill(Math.round(s.avg))); setFont(row.getCell(2), { bold:true, color:{argb:bandFont(Math.round(s.avg))} });
-        const sc = row.getCell(6);
-        if (status.startsWith('OUTLIER (above)')) { setFill(sc, DARK); setFont(sc, { bold:true, color:{argb:WHITE} }); }
-        else if (status.startsWith('OUTLIER (below)')) { setFill(sc, RED); setFont(sc, { bold:true, color:{argb:WHITE} }); }
-        else { setFill(sc, 'FFEEEEEE'); setFont(sc, { size:10, color:{argb:'FF789'} }); }
-        sc.alignment = { horizontal:'left', indent:1 };
-        [1,2,3,4,5,6].forEach(i => row.getCell(i).border = thinBorder);
-      });
-      ws3.addRow([]);
 
-      // --- Section 5: Recommendations (prioritized) ---
-      const sec5 = ws3.addRow(['SECTION 5: PRIORITIZED RECOMMENDATIONS']);
+      // --- Section 4: Recommendations (prioritized) ---
+      const sec5 = ws3.addRow(['SECTION 4: PRIORITIZED RECOMMENDATIONS']);
       ws3.mergeCells(sec5.number, 1, sec5.number, TA_COLS); sec5.height = 20;
       sec5.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec5.getCell(1), DARK); sec5.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       const sec5Hdr = ws3.addRow(['PRIORITY','AREA','FINDING','RECOMMENDATION','','','OWNER']);
@@ -5264,7 +5243,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       ws3.addRow([]);
 
       // --- Section 6: Detailed Key Insight (date-range aware narrative) ---
-      const sec6 = ws3.addRow(['SECTION 6: DETAILED KEY INSIGHT ('+monthLbl+')']);
+      const sec6 = ws3.addRow(['SECTION 5: DETAILED KEY INSIGHT ('+monthLbl+')']);
       ws3.mergeCells(sec6.number, 1, sec6.number, TA_COLS); sec6.height = 20;
       sec6.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec6.getCell(1), DARK); sec6.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       // Build narrative
@@ -5340,7 +5319,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       });
 
       // ===== Section 7: Fresh vs Ambient (separate targets) =====
-      const sec7 = ws3.addRow(['SECTION 7: FRESH vs AMBIENT - SEPARATE SERVICE-LEVEL TARGETS']);
+      const sec7 = ws3.addRow(['SECTION 6: FRESH vs AMBIENT - SEPARATE SERVICE-LEVEL TARGETS']);
       ws3.mergeCells(sec7.number, 1, sec7.number, TA_COLS); sec7.height = 20;
       sec7.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec7.getCell(1), DARK); sec7.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       const freshCats = ['POULTRY','EGGS','MEAT'];
@@ -5375,7 +5354,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       ws3.addRow([]);
 
       // ===== Section 8: AM vs PM Gap per Store/Category =====
-      const sec8 = ws3.addRow(['SECTION 8: AM vs PM GAP - REPLENISHMENT CYCLE DIAGNOSTIC']);
+      const sec8 = ws3.addRow(['SECTION 7: AM vs PM GAP - REPLENISHMENT CYCLE DIAGNOSTIC']);
       ws3.mergeCells(sec8.number, 1, sec8.number, TA_COLS); sec8.height = 20;
       sec8.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec8.getCell(1), DARK); sec8.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       const sec8Hdr = ws3.addRow(['STORE','CATEGORY','AM %','PM %','PM - AM','DIAGNOSIS','']);
@@ -5416,7 +5395,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       ws3.addRow([]);
 
       // ===== Section 9: Repeat Offender Score (longest consecutive-days OOS per SKU) =====
-      const sec9 = ws3.addRow(['SECTION 9: REPEAT OFFENDERS - LONGEST CONSECUTIVE-DAY OOS STREAK PER SKU']);
+      const sec9 = ws3.addRow(['SECTION 8: REPEAT OFFENDERS - LONGEST CONSECUTIVE-DAY OOS STREAK PER SKU']);
       ws3.mergeCells(sec9.number, 1, sec9.number, TA_COLS); sec9.height = 20;
       sec9.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec9.getCell(1), DARK); sec9.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       const sec9Hdr = ws3.addRow(['STORE','CATEGORY','SKU','DESCRIPTION','LONGEST STREAK (days)','TOTAL OOS DAYS','']);
@@ -5454,7 +5433,7 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       ws3.addRow([]);
 
       // ===== Section 10: Rolling 7-day OSA (per store) =====
-      const sec10 = ws3.addRow(['SECTION 10: ROLLING 7-DAY OSA - RECENT MOMENTUM (smoother than WoW)']);
+      const sec10 = ws3.addRow(['SECTION 9: ROLLING 7-DAY OSA - RECENT MOMENTUM (smoother than WoW)']);
       ws3.mergeCells(sec10.number, 1, sec10.number, TA_COLS); sec10.height = 20;
       sec10.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec10.getCell(1), DARK); sec10.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
       const sec10Hdr = ws3.addRow(['STORE','LAST 7 DAYS %','PRIOR 7 DAYS %','MOMENTUM (delta)','DIRECTION','','']);
@@ -5491,35 +5470,9 @@ async function exportOSAExcel({ from, to, area, store, assigned, preparedBy, isR
       });
       ws3.addRow([]);
 
-      // ===== Section 11: First-Time-Right (perfect-slot) rate =====
-      const sec11 = ws3.addRow(['SECTION 11: FIRST-TIME-RIGHT - % OF SLOT SUBMISSIONS AT 100% OSA']);
-      ws3.mergeCells(sec11.number, 1, sec11.number, TA_COLS); sec11.height = 20;
-      sec11.getCell(1).font = { bold:true, color:{argb:WHITE}, size:12 }; setFill(sec11.getCell(1), DARK); sec11.getCell(1).alignment = { horizontal:'left', vertical:'middle', indent:1 };
-      const sec11Hdr = ws3.addRow(['STORE','PERFECT SLOTS','TOTAL SLOTS','FIRST-TIME-RIGHT %','GRADE','','']);
-      sec11Hdr.eachCell(c => { setFill(c, LIGHT); setFont(c, { bold:true, color:{argb:WHITE} }); setAlign(c); c.border = thinBorder; });
-      const ftrRows = Object.keys(perStoreSlot).map(st => {
-        let perfect = 0, totalSlots = 0;
-        Object.values(perStoreSlot[st]).forEach(dayMap => {
-          Object.values(dayMap).forEach(sl => { totalSlots++; if (sl.total > 0 && sl.oos === 0) perfect++; });
-        });
-        const pct = totalSlots ? Math.round((perfect/totalSlots)*100) : null;
-        return { st, perfect, totalSlots, pct };
-      }).sort((a,b) => (b.pct||0) - (a.pct||0));
-      ftrRows.forEach(r => {
-        const grade = r.pct === null ? 'N/A' : r.pct >= 80 ? 'A - excellent discipline' : r.pct >= 60 ? 'B - good, push for 80%' : r.pct >= 40 ? 'C - inconsistent, process review' : 'D - fire-fighting daily';
-        const row = ws3.addRow([r.st, r.perfect, r.totalSlots, r.pct===null?'-':r.pct+'%', grade, '', '']);
-        row.getCell(1).font = { bold:true }; row.getCell(1).alignment = { horizontal:'left', indent:1 };
-        [2,3].forEach(i => { row.getCell(i).alignment = { horizontal:'center' }; row.getCell(i).font = { bold:true }; });
-        setFill(row.getCell(4), bandFill(r.pct)); setFont(row.getCell(4), { bold:true, color:{argb:bandFont(r.pct)} }); setAlign(row.getCell(4));
-        const gc = row.getCell(5); const gBg = grade.startsWith('A') ? DARK : grade.startsWith('B') ? LIGHT : grade.startsWith('C') ? AMBER : grade.startsWith('D') ? RED : 'FFEEEEEE';
-        setFill(gc, gBg); setFont(gc, { bold:true, color:{argb: gBg==='FFEEEEEE'?'FF333333':WHITE}, size:10 }); gc.alignment = { horizontal:'left', vertical:'middle', indent:1 };
-        [1,2,3,4,5].forEach(i => row.getCell(i).border = thinBorder);
-      });
-      ws3.addRow([]);
-
       // Methodology footer
       ws3.addRow([]);
-      const foot = ws3.addRow(['METHODOLOGY NOTES: Sections 1-6 (strategic analytics): WoW delta = Week N - Week N-1. Slope = linear regression over weekly means (pts/week). SD = standard deviation across weeks. SPC control limits = mean +/- 2sd (approx 95% confidence). Pareto = cumulative share of total OOS incidents. Target benchmark = 95% OSA. Sections 7-11 (retail-native daily metrics): Fresh target 92% (POULTRY/EGGS/MEAT - short shelf life), Ambient target 97% (RICE/SUGAR - long shelf life). AM/PM Gap > 5 pts suggests a replenishment-process issue not a supply issue. Repeat Offender streak counts consecutive calendar days a SKU was flagged OOS (any slot); 2+ day streak = systemic, not one-off. Rolling 7-day compares the last 7 calendar days vs the 7 before. First-Time-Right = % of slot submissions where all SKUs in that slot were Available (zero OOS).']);
+      const foot = ws3.addRow(['METHODOLOGY NOTES: Sections 1-5 (strategic analytics): WoW delta = Week N - Week N-1. Slope = linear regression over weekly means (pts/week). SD = standard deviation across weeks. Pareto = cumulative share of total OOS incidents. Target benchmark = 95% OSA. Sections 6-9 (retail-native daily metrics): Fresh target 92% (POULTRY/EGGS/MEAT - short shelf life), Ambient target 97% (RICE/SUGAR - long shelf life). AM/PM Gap > 5 pts suggests a replenishment-process issue not a supply issue. Repeat Offender streak counts consecutive calendar days a SKU was flagged OOS (any slot); 2+ day streak = systemic, not one-off. Rolling 7-day compares the last 7 calendar days vs the 7 before.']);
       ws3.mergeCells(foot.number, 1, foot.number, TA_COLS);
       foot.getCell(1).font = { italic:true, size:9, color:{argb:'FF789'} };
       foot.getCell(1).alignment = { horizontal:'left', vertical:'top', wrapText:true, indent:1 };

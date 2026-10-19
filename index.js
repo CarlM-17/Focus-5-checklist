@@ -1308,6 +1308,73 @@ app.get('/api/sku-history', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// Compliance Gap — per-store daily submission compliance over a date range
+app.get('/api/sku-compliance-gap', async (req, res) => {
+  try {
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    if (!from || !to) return res.json({ ok:false, error:'from and to required' });
+    const normKey = (s) => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'');
+    let assignedList = [];
+    try { assignedList = JSON.parse(req.query.assigned || '[]'); } catch(_) {}
+    const assignedKeys = new Set(assignedList.map(normKey).filter(Boolean));
+    const areaFilter = (req.query.area || '').trim().toLowerCase();
+
+    const stores = await sheetsGet('ListOfStores!A2:G');
+    const scope = [];
+    stores.forEach(r => {
+      const remarks = String(r[6]||'').trim().toLowerCase();
+      if (remarks !== 'all' && remarks !== 'focus5sku') return;
+      const name = (r[4]||'').trim(); if (!name) return;
+      const area = (r[2]||'').trim();
+      if (areaFilter && area.toLowerCase() !== areaFilter) return;
+      if (assignedKeys.size) {
+        const nk = normKey(name), ik = normKey(r[3]);
+        if (!(assignedKeys.has(nk) || assignedKeys.has(ik))) return;
+      }
+      scope.push({ id: String(r[3]||'').trim(), name, area });
+    });
+
+    // Build day list within range (cap at today in PH to avoid counting future days)
+    const todayPH = todayLocalPHstr();
+    const days = [];
+    const d1 = new Date(from+'T00:00:00'), d2 = new Date(to+'T00:00:00'), dCap = new Date(todayPH+'T00:00:00');
+    const dEnd = d2 < dCap ? d2 : dCap;
+    for (let d = new Date(d1); d <= dEnd; d.setDate(d.getDate()+1)) {
+      days.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));
+    }
+
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
+    // Build (storeKey, date, slot) presence set
+    const submitted = {}; // storeNameLc -> { date|slot }
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const date = r[4]; if (!date || date < from || date > to) return;
+      const storeLc = (r[3]||'').trim().toLowerCase();
+      const slot = ((r[5]||'AM')+'').trim().toUpperCase();
+      submitted[storeLc] = submitted[storeLc] || new Set();
+      submitted[storeLc].add(date+'|'+slot);
+    });
+
+    const expectedSlots = days.length * 2;
+    const results = scope.map(s => {
+      const key = s.name.toLowerCase();
+      const grid = days.map(d => ({
+        date: d,
+        am: !!(submitted[key] && submitted[key].has(d+'|AM')),
+        pm: !!(submitted[key] && submitted[key].has(d+'|PM'))
+      }));
+      let submittedCount = 0;
+      grid.forEach(g => { if (g.am) submittedCount++; if (g.pm) submittedCount++; });
+      const compliance = expectedSlots ? Math.round((submittedCount/expectedSlots)*100) : null;
+      const missed = expectedSlots - submittedCount;
+      return { store: s.name, area: s.area, expected: expectedSlots, submitted: submittedCount, missed, compliance, grid };
+    }).sort((a,b) => (a.compliance||0) - (b.compliance||0));
+
+    res.json({ ok:true, from, to, days, expectedSlots, stores: results });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 app.get('/api/sku-rm-monitor', async (req, res) => {
   try {
     const date = (req.query.date || todayLocalPHstr()).trim();
@@ -5910,7 +5977,88 @@ async function loadStockTabRM(){
     <div id="osaOut"></div>
   </div>\`;
 
-  out.innerHTML = kpiRow + amReviewCard + matrixCard + osaCard + catCard + trendCard + gridCard + latesCard + detailCard;
+  // ===== Compliance Gap card (daily check compliance per store) =====
+  const _nowCG = new Date(); const _cgFromD = new Date(_nowCG.getFullYear(), _nowCG.getMonth(), 1);
+  const cgFromDefault = _cgFromD.getFullYear()+'-'+String(_cgFromD.getMonth()+1).padStart(2,'0')+'-'+String(_cgFromD.getDate()).padStart(2,'0');
+  const cgToDefault = todayStr();
+  const complianceCard = \`<div class="card" id="complianceGapCard">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">Compliance Gap - Daily Check (per Store)</h3>
+      <span class="muted" style="font-size:12px">AM + PM daily submission count vs expected</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px" data-no-png>
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="cgFrom" type="date" value="\${cgFromDefault}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="cgTo" type="date" value="\${cgToDefault}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <button id="cgApply" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+      <button id="cgPng" style="padding:7px 14px;background:#345;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">&#128247; Export PNG</button>
+    </div>
+    <div id="cgOut"></div>
+  </div>\`;
+
+  out.innerHTML = kpiRow + amReviewCard + complianceCard + matrixCard + osaCard + catCard + trendCard + gridCard + latesCard + detailCard;
+
+  // Wire up Compliance Gap
+  const cgAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
+  async function runCG(){
+    const o = $('#cgOut'); o.innerHTML = '<div class="muted" style="padding:12px">Loading...</div>';
+    const qs = 'from='+encodeURIComponent($('#cgFrom').value||'')+'&to='+encodeURIComponent($('#cgTo').value||'')+'&assigned='+encodeURIComponent(JSON.stringify(cgAssigned||[]));
+    const r = await api('/api/sku-compliance-gap?'+qs);
+    if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    if (!r.stores.length) { o.innerHTML = '<div class="muted" style="padding:12px">No stores in scope.</div>'; return; }
+    // Summary strip
+    const full = r.stores.filter(s => s.compliance === 100).length;
+    const partial = r.stores.filter(s => s.compliance >= 80 && s.compliance < 100).length;
+    const critical = r.stores.filter(s => s.compliance < 80).length;
+    const avgPct = r.stores.length ? Math.round(r.stores.reduce((n,s)=>n+(s.compliance||0),0)/r.stores.length) : 0;
+    const summary = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+      + '<div style="flex:1 1 140px;background:#1f7a3a;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+full+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">100% Compliant</div></div>'
+      + '<div style="flex:1 1 140px;background:#e0a020;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+partial+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Minor Gap (80-99%)</div></div>'
+      + '<div style="flex:1 1 140px;background:#c33;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+critical+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Critical Gap (<80%)</div></div>'
+      + '<div style="flex:1 1 140px;background:#345;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+avgPct+'%</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Avg Compliance</div></div>'
+      + '<div style="flex:1 1 140px;background:#eef;color:#345;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+r.expectedSlots+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Slots Expected / Store</div></div>'
+      + '</div>';
+    const bandColor = (p) => p===100?'#1f7a3a':p>=80?'#e0a020':'#c33';
+    const bandLabel = (p) => p===100?'100% COMPLIANT':p>=80?'MINOR GAP':'CRITICAL GAP';
+    // Day grid cells: tiny color blocks per day showing AM/PM status
+    const gridHdr = r.days.length <= 40 ? '<th style="padding:4px 6px;text-align:left;font-size:10px;color:#789">Daily grid (upper=AM, lower=PM, green=submitted, red=missed)</th>' : '';
+    const rows = r.stores.map(s => {
+      let grid = '';
+      if (r.days.length <= 40) {
+        grid = '<div style="display:flex;gap:1px;flex-wrap:nowrap;overflow-x:auto">' + s.grid.map(g => {
+          const amC = g.am ? '#1f7a3a' : '#c33';
+          const pmC = g.pm ? '#1f7a3a' : '#c33';
+          return '<div title="'+g.date+' AM:'+(g.am?'ok':'MISS')+' PM:'+(g.pm?'ok':'MISS')+'" style="display:flex;flex-direction:column;width:10px;height:18px;flex:0 0 10px"><div style="height:9px;background:'+amC+'"></div><div style="height:9px;background:'+pmC+'"></div></div>';
+        }).join('') + '</div>';
+      }
+      return '<tr style="border-bottom:1px solid #eee">'
+        + '<td style="padding:6px 8px;font-weight:600;font-size:12px">'+escapeHtml(s.store)+'<div style="font-size:10px;color:#789">'+escapeHtml(s.area)+'</div></td>'
+        + '<td style="padding:6px 8px;text-align:center;font-size:12px">'+s.submitted+' / '+s.expected+'</td>'
+        + '<td style="padding:6px 8px;text-align:center;font-size:12px;color:'+(s.missed?('#c33'):('#1f7a3a'))+';font-weight:'+(s.missed?'700':'600')+'">'+s.missed+'</td>'
+        + '<td style="padding:6px 8px;text-align:center"><span style="background:'+bandColor(s.compliance)+';color:#fff;padding:3px 10px;border-radius:12px;font-weight:800;font-size:12px">'+s.compliance+'%</span></td>'
+        + '<td style="padding:6px 8px;text-align:left;color:'+bandColor(s.compliance)+';font-weight:700;font-size:11px">'+bandLabel(s.compliance)+'</td>'
+        + (r.days.length <= 40 ? ('<td style="padding:4px 6px">'+grid+'</td>') : '')
+        + '</tr>';
+    }).join('');
+    const table = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">Store</th><th style="padding:6px 8px;text-align:center">Submitted / Expected</th><th style="padding:6px 8px;text-align:center">Missed</th><th style="padding:6px 8px;text-align:center">Compliance</th><th style="padding:6px 8px;text-align:left">Status</th>'+gridHdr+'</tr></thead><tbody>'+rows+'</tbody></table></div>';
+    o.innerHTML = summary + table + '<div style="margin-top:8px;font-size:11px;color:#789">Period: <b>'+r.from+'</b> to <b>'+r.to+'</b> &middot; '+r.days.length+' days &middot; expected '+r.expectedSlots+' slots per store (AM+PM)</div>';
+  }
+  $('#cgApply').onclick = runCG;
+  $('#cgPng').onclick = async () => {
+    if (typeof html2canvas === 'undefined') { alert('PNG library still loading. Try again in a moment.'); return; }
+    const el = $('#complianceGapCard');
+    // Hide no-png elements during capture
+    const hidden = el.querySelectorAll('[data-no-png]');
+    hidden.forEach(h => h.style.display = 'none');
+    try {
+      const canvas = await html2canvas(el, { scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false });
+      canvas.toBlob(b => {
+        const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+        a.download = 'Compliance_Gap_'+($('#cgFrom').value||'')+'_to_'+($('#cgTo').value||'')+'.png';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+      }, 'image/png');
+    } finally { hidden.forEach(h => h.style.display = ''); }
+  };
+  runCG();
 
   // Wire up On-Shelf Availability
   const osaAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
@@ -6145,7 +6293,70 @@ function renderReviewTab(){
     <div id="osaOutAM"></div>
   </div>\`;
 
-  out.innerHTML = headerCard + amSection + pmSection + matrixCard_AM + osaCardAM + detailCard_AM;
+  // ===== Compliance Gap for AM (same card, scoped to assignedStores) =====
+  const _nowCGA = new Date(); const _cgFromDA = new Date(_nowCGA.getFullYear(), _nowCGA.getMonth(), 1);
+  const cgFromAM = _cgFromDA.getFullYear()+'-'+String(_cgFromDA.getMonth()+1).padStart(2,'0')+'-'+String(_cgFromDA.getDate()).padStart(2,'0');
+  const cgToAM = todayStr();
+  const complianceCardAM = \`<div class="card" id="complianceGapCardAM">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0;color:#1f7a3a">Compliance Gap - Daily Check (your stores)</h3>
+      <span class="muted" style="font-size:12px">AM + PM daily submission count vs expected</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px" data-no-png>
+      <div><label style="font-size:11px;color:#789;display:block">From</label><input id="cgFromAM" type="date" value="\${cgFromAM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <div><label style="font-size:11px;color:#789;display:block">To</label><input id="cgToAM" type="date" value="\${cgToAM}" style="padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px"></div>
+      <button id="cgApplyAM" style="padding:7px 14px;background:#1f7a3a;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">Apply</button>
+      <button id="cgPngAM" style="padding:7px 14px;background:#345;color:#fff;border:0;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px">&#128247; Export PNG</button>
+    </div>
+    <div id="cgOutAM"></div>
+  </div>\`;
+
+  out.innerHTML = headerCard + amSection + pmSection + complianceCardAM + matrixCard_AM + osaCardAM + detailCard_AM;
+
+  async function runCGAM(){
+    const o = $('#cgOutAM'); o.innerHTML = '<div class="muted" style="padding:12px">Loading...</div>';
+    const qs = 'from='+encodeURIComponent($('#cgFromAM').value||'')+'&to='+encodeURIComponent($('#cgToAM').value||'')+'&assigned='+encodeURIComponent(JSON.stringify(S.assignedStores||[]));
+    const r = await api('/api/sku-compliance-gap?'+qs);
+    if (!r.ok) { o.innerHTML = '<div class="err">'+escapeHtml(r.error||'Failed')+'</div>'; return; }
+    if (!r.stores.length) { o.innerHTML = '<div class="muted" style="padding:12px">No stores in scope.</div>'; return; }
+    const full = r.stores.filter(s => s.compliance === 100).length;
+    const partial = r.stores.filter(s => s.compliance >= 80 && s.compliance < 100).length;
+    const critical = r.stores.filter(s => s.compliance < 80).length;
+    const avgPct = r.stores.length ? Math.round(r.stores.reduce((n,s)=>n+(s.compliance||0),0)/r.stores.length) : 0;
+    const summary = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+      + '<div style="flex:1 1 140px;background:#1f7a3a;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+full+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">100% Compliant</div></div>'
+      + '<div style="flex:1 1 140px;background:#e0a020;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+partial+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Minor Gap</div></div>'
+      + '<div style="flex:1 1 140px;background:#c33;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+critical+'</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Critical Gap</div></div>'
+      + '<div style="flex:1 1 140px;background:#345;color:#fff;padding:10px 12px;border-radius:8px"><div style="font-size:22px;font-weight:800">'+avgPct+'%</div><div style="font-size:11px;font-weight:600;text-transform:uppercase">Avg Compliance</div></div>'
+      + '</div>';
+    const bandColor = (p) => p===100?'#1f7a3a':p>=80?'#e0a020':'#c33';
+    const bandLabel = (p) => p===100?'100% COMPLIANT':p>=80?'MINOR GAP':'CRITICAL GAP';
+    const gridHdr = r.days.length <= 40 ? '<th style="padding:4px 6px;text-align:left;font-size:10px;color:#789">Daily grid</th>' : '';
+    const rows = r.stores.map(s => {
+      let grid = '';
+      if (r.days.length <= 40) {
+        grid = '<div style="display:flex;gap:1px;flex-wrap:nowrap;overflow-x:auto">' + s.grid.map(g => {
+          const amC = g.am ? '#1f7a3a' : '#c33'; const pmC = g.pm ? '#1f7a3a' : '#c33';
+          return '<div title="'+g.date+' AM:'+(g.am?'ok':'MISS')+' PM:'+(g.pm?'ok':'MISS')+'" style="display:flex;flex-direction:column;width:10px;height:18px;flex:0 0 10px"><div style="height:9px;background:'+amC+'"></div><div style="height:9px;background:'+pmC+'"></div></div>';
+        }).join('') + '</div>';
+      }
+      return '<tr style="border-bottom:1px solid #eee"><td style="padding:6px 8px;font-weight:600;font-size:12px">'+escapeHtml(s.store)+'<div style="font-size:10px;color:#789">'+escapeHtml(s.area)+'</div></td><td style="padding:6px 8px;text-align:center;font-size:12px">'+s.submitted+' / '+s.expected+'</td><td style="padding:6px 8px;text-align:center;font-size:12px;color:'+(s.missed?'#c33':'#1f7a3a')+';font-weight:'+(s.missed?'700':'600')+'">'+s.missed+'</td><td style="padding:6px 8px;text-align:center"><span style="background:'+bandColor(s.compliance)+';color:#fff;padding:3px 10px;border-radius:12px;font-weight:800;font-size:12px">'+s.compliance+'%</span></td><td style="padding:6px 8px;text-align:left;color:'+bandColor(s.compliance)+';font-weight:700;font-size:11px">'+bandLabel(s.compliance)+'</td>'+(r.days.length<=40?('<td style="padding:4px 6px">'+grid+'</td>'):'')+'</tr>';
+    }).join('');
+    const table = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef"><th style="padding:6px 8px;text-align:left">Store</th><th style="padding:6px 8px;text-align:center">Submitted / Expected</th><th style="padding:6px 8px;text-align:center">Missed</th><th style="padding:6px 8px;text-align:center">Compliance</th><th style="padding:6px 8px;text-align:left">Status</th>'+gridHdr+'</tr></thead><tbody>'+rows+'</tbody></table></div>';
+    o.innerHTML = summary + table + '<div style="margin-top:8px;font-size:11px;color:#789">Period: <b>'+r.from+'</b> to <b>'+r.to+'</b> &middot; '+r.days.length+' days &middot; expected '+r.expectedSlots+' slots per store</div>';
+  }
+  $('#cgApplyAM').onclick = runCGAM;
+  $('#cgPngAM').onclick = async () => {
+    if (typeof html2canvas === 'undefined') { alert('PNG library still loading.'); return; }
+    const el = $('#complianceGapCardAM');
+    const hidden = el.querySelectorAll('[data-no-png]');
+    hidden.forEach(h => h.style.display = 'none');
+    try {
+      const canvas = await html2canvas(el, { scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false });
+      canvas.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'Compliance_Gap_'+($('#cgFromAM').value||'')+'_to_'+($('#cgToAM').value||'')+'.png'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 'image/png');
+    } finally { hidden.forEach(h => h.style.display = ''); }
+  };
+  runCGAM();
 
   function osaCellStyleAM(pct){
     if (pct === null) return 'background:#f7f7f7;color:#bbb';

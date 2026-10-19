@@ -1308,6 +1308,20 @@ app.get('/api/sku-history', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// Earliest date with SKUChecklistData activity (used to set the default From date)
+app.get('/api/sku-first-date', async (req, res) => {
+  try {
+    const rows = await sheetsGet('SKUChecklistData!A2:M');
+    let min = null;
+    rows.forEach(r => {
+      if ((r[12]||'ACTIVE') !== 'ACTIVE') return;
+      const d = r[4]; if (!d) return;
+      if (!min || d < min) min = d;
+    });
+    res.json({ ok:true, firstDate: min });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 // Compliance Gap — per-store daily submission compliance over a date range
 app.get('/api/sku-compliance-gap', async (req, res) => {
   try {
@@ -6046,9 +6060,14 @@ async function loadStockTabRM(){
   $('#cgPng').onclick = async () => {
     if (typeof html2canvas === 'undefined') { alert('PNG library still loading. Try again in a moment.'); return; }
     const el = $('#complianceGapCard');
-    // Hide no-png elements during capture
     const hidden = el.querySelectorAll('[data-no-png]');
     hidden.forEach(h => h.style.display = 'none');
+    // Inject export title banner at top
+    const banner = document.createElement('div');
+    banner.setAttribute('data-png-banner','1');
+    banner.style.cssText = 'margin:-16px -16px 12px -16px;padding:14px 18px;background:#1f7a3a;color:#fff;border-radius:12px 12px 0 0;text-align:center';
+    banner.innerHTML = '<div style="font-size:16px;font-weight:800;letter-spacing:.5px">FRESH FOCUS 5 STOCK STATUS</div><div style="font-size:13px;font-weight:600;margin-top:2px;opacity:.95">Daily Checklist AM/PM Compliance Gap</div><div style="font-size:11px;font-weight:400;margin-top:4px;opacity:.9">Period: '+($('#cgFrom').value||'')+' to '+($('#cgTo').value||'')+' &middot; Generated '+new Date().toLocaleString()+'</div>';
+    el.insertBefore(banner, el.firstChild);
     try {
       const canvas = await html2canvas(el, { scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false });
       canvas.toBlob(b => {
@@ -6056,9 +6075,14 @@ async function loadStockTabRM(){
         a.download = 'Compliance_Gap_'+($('#cgFrom').value||'')+'_to_'+($('#cgTo').value||'')+'.png';
         document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
       }, 'image/png');
-    } finally { hidden.forEach(h => h.style.display = ''); }
+    } finally { hidden.forEach(h => h.style.display = ''); banner.remove(); }
   };
-  runCG();
+  // Default From = earliest data date (fallback to current month start)
+  (async () => {
+    const fd = await api('/api/sku-first-date');
+    if (fd.ok && fd.firstDate) { $('#cgFrom').value = fd.firstDate; }
+    runCG();
+  })();
 
   // Wire up On-Shelf Availability
   const osaAssigned = (S.level && S.level.toLowerCase() === 'area manager') ? S.assignedStores : [];
@@ -6351,12 +6375,20 @@ function renderReviewTab(){
     const el = $('#complianceGapCardAM');
     const hidden = el.querySelectorAll('[data-no-png]');
     hidden.forEach(h => h.style.display = 'none');
+    const banner = document.createElement('div');
+    banner.style.cssText = 'margin:-16px -16px 12px -16px;padding:14px 18px;background:#1f7a3a;color:#fff;border-radius:12px 12px 0 0;text-align:center';
+    banner.innerHTML = '<div style="font-size:16px;font-weight:800;letter-spacing:.5px">FRESH FOCUS 5 STOCK STATUS</div><div style="font-size:13px;font-weight:600;margin-top:2px;opacity:.95">Daily Checklist AM/PM Compliance Gap</div><div style="font-size:11px;font-weight:400;margin-top:4px;opacity:.9">Period: '+($('#cgFromAM').value||'')+' to '+($('#cgToAM').value||'')+' &middot; Generated '+new Date().toLocaleString()+'</div>';
+    el.insertBefore(banner, el.firstChild);
     try {
       const canvas = await html2canvas(el, { scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false });
       canvas.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'Compliance_Gap_'+($('#cgFromAM').value||'')+'_to_'+($('#cgToAM').value||'')+'.png'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 'image/png');
-    } finally { hidden.forEach(h => h.style.display = ''); }
+    } finally { hidden.forEach(h => h.style.display = ''); banner.remove(); }
   };
-  runCGAM();
+  (async () => {
+    const fd = await api('/api/sku-first-date');
+    if (fd.ok && fd.firstDate) { $('#cgFromAM').value = fd.firstDate; }
+    runCGAM();
+  })();
 
   function osaCellStyleAM(pct){
     if (pct === null) return 'background:#f7f7f7;color:#bbb';
